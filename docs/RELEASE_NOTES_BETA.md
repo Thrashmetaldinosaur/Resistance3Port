@@ -1,6 +1,6 @@
 # Resistance 3 PC port: community beta release notes
 
-**Version:** 0.3.0-beta (GitHub pre-release). **Release date:** 2026-11-20.
+**Version:** 0.3.0-beta.1 (GitHub pre-release). **Release date:** 2026-11-21.
 
 A native PC port of *Resistance 3* (PS3) built by static recompilation: the game's PowerPC and SPU code is translated to C/C++ and compiled for Windows. Graphics go through RPCS3's Vulkan renderer, built into the game as a library.
 
@@ -12,6 +12,14 @@ This is a **beta**. Only the intro and the opening Haven level have been played 
 
 ### Project
 - **CI and release tooling**, contributed by @undecuple: a release build workflow that builds Setup, the zips and checksums with `scripts\package_beta.ps1` on a Windows runner and only ever creates a *draft* release from a version tag (PR #2); a check that no game files and no unexpected large files are committed, using the same patterns as `package_beta.ps1` (PR #19); a gitleaks secrets scan (PR #20); Dependabot updates for the pinned GitHub Actions (PR #21); and `ps3recomp/UPSTREAM_BASE`, which records the upstream ps3recomp commit range the original import came from (PR #22).
+
+## 0.3.0-beta.1 (hotfix)
+
+Setup fix only; the game itself is unchanged from 0.3.0.
+
+- **Updating over a 0.2.x install no longer fails** with `'Emu/RSX/port_texdiag.h' file not found` while building the RSX core (Resistance2Port #17, Resistance3Port #24). Setup kept the RPCS3 source folder from 0.2.x (`ps3recomp\third_party\rpcs3`) and never applied 0.3.0's patch to it. It now detects a source patched by an older version and patches it again automatically (the old changes are kept in git's stash there; a copy that is not a git checkout is downloaded again). `build.bat` also checks the patch before building.
+
+If you installed 0.3.0 fresh and it built, you don't need this update.
 
 ## 0.3.0-beta
 
