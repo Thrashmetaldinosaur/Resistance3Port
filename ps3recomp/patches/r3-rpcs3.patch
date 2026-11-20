@@ -7475,11 +7475,14 @@ index ae6a3bd..c5bbd22 100644
  		cache->m_cached_fp_properties.mrt_buffers_count = ref.mrt_buffers_count;
  	}
 diff --git a/rpcs3/Emu/RSX/Program/ProgramStateCache.h b/rpcs3/Emu/RSX/Program/ProgramStateCache.h
-index c3d0821..09cdead 100644
+index c3d0821..4af8f12 100644
 --- a/rpcs3/Emu/RSX/Program/ProgramStateCache.h
 +++ b/rpcs3/Emu/RSX/Program/ProgramStateCache.h
-@@ -9,9 +9,14 @@
+@@ -7,11 +7,17 @@
+ #include "util/logs.hpp"
+ #include "util/fnv_hash.hpp"
  #include "util/v128.hpp"
++#include "Emu/RSX/port_r2preload.h" // R2PORT (issue #16)
  #include <util/bless.hpp>
  
 +#include <array>
@@ -7493,7 +7496,7 @@ index c3d0821..09cdead 100644
  enum class SHADER_TYPE
  {
  	SHADER_TYPE_VERTEX,
-@@ -207,7 +212,8 @@ protected:
+@@ -207,7 +213,8 @@ protected:
  	shared_mutex m_decompiler_mutex;
  
  	atomic_t<usz> m_next_id = 0;
@@ -7503,7 +7506,7 @@ index c3d0821..09cdead 100644
  
  	binary_to_vertex_program m_vertex_shader_cache;
  	binary_to_fragment_program m_fragment_shader_cache;
-@@ -219,6 +225,50 @@ protected:
+@@ -219,6 +226,72 @@ protected:
  	fragment_program_type __null_fragment_program;
  	pipeline_storage_type __null_pipeline_handle;
  
@@ -7517,6 +7520,28 @@ index c3d0821..09cdead 100644
 +		const u32 n = ++s_failed;
 +		rsx_log.error("Pipeline link failed (vp id = %d, fp id = %d): its draws are skipped for this session (failed pipelines: %u)",
 +			key.vertex_program_id, key.fragment_program_id, n);
++	}
++
++	// R2PORT (issue #16): a link that faulted on a preload thread drops its placeholder instead, so the game's draw
++	// links the pipeline during play (render / compiler thread, SEH-guarded as well; a fault there keeps it failed).
++	// Kept failed, the draw was skipped all session (AMD: preload faults; a skipped sky / background pass leaves
++	// an earlier pass's image in its pixels, the doubled background). PORT_PRELOAD_FAULT_RELINK=0: old rule.
++	void r2_on_failed_pipeline(const pipeline_key& key)
++	{
++		if (r2preload::relink_after_preload_fault())
++		{
++			{
++				std::lock_guard lock(m_pipeline_mutex);
++				if (const auto I = m_storage.find(key); I != m_storage.end() && I->second == __null_pipeline_handle)
++				{
++					m_storage.erase(I);
++				}
++			}
++			rsx_log.error("Pipeline link failed on a preload thread (vp id = %d, fp id = %d): linked again when a draw needs it",
++				key.vertex_program_id, key.fragment_program_id);
++			return;
++		}
++		r2_log_failed_pipeline(key);
 +	}
 +
 +	// R3PORT: ucode MRU. Without a valid cache hint (new shader address, a re-sent program after a constant patch,
@@ -7554,7 +7579,7 @@ index c3d0821..09cdead 100644
  	/// bool here to inform that the program was preexisting.
  	std::tuple<const vertex_program_type&, bool> search_vertex_program(
  		rsx::program_cache_hint_t* cache_hint,
-@@ -230,6 +280,20 @@ protected:
+@@ -230,6 +303,20 @@ protected:
  			return std::forward_as_tuple(*cache_hint->get_vertex_program<vertex_program_type>(), true);
  		}
  
@@ -7575,7 +7600,7 @@ index c3d0821..09cdead 100644
  		bool recompile = false;
  		vertex_program_type* new_shader;
  		{
-@@ -238,6 +302,7 @@ protected:
+@@ -238,6 +325,7 @@ protected:
  			const auto& I = m_vertex_shader_cache.find(rsx_vp);
  			if (I != m_vertex_shader_cache.end())
  			{
@@ -7583,7 +7608,7 @@ index c3d0821..09cdead 100644
  				rsx::program_cache_hint_t::cache_vertex_program(cache_hint, rsx_vp, &(I->second));
  				return std::forward_as_tuple(I->second, true);
  			}
-@@ -248,6 +313,7 @@ protected:
+@@ -248,6 +336,7 @@ protected:
  			auto [it, inserted] = m_vertex_shader_cache.try_emplace(rsx_vp);
  			new_shader = &(it->second);
  			recompile = inserted;
@@ -7591,7 +7616,7 @@ index c3d0821..09cdead 100644
  		}
  
  		if (recompile)
-@@ -268,6 +334,19 @@ protected:
+@@ -268,6 +357,19 @@ protected:
  			return std::forward_as_tuple(*cache_hint->get_fragment_program<fragment_program_type>(), true);
  		}
  
@@ -7611,7 +7636,7 @@ index c3d0821..09cdead 100644
  		bool recompile = false;
  		typename binary_to_fragment_program::iterator it;
  		fragment_program_type* new_shader;
-@@ -277,6 +356,7 @@ protected:
+@@ -277,6 +379,7 @@ protected:
  			const auto& I = m_fragment_shader_cache.find(rsx_fp);
  			if (I != m_fragment_shader_cache.end())
  			{
@@ -7619,7 +7644,7 @@ index c3d0821..09cdead 100644
  				rsx::program_cache_hint_t::cache_fragment_program(cache_hint, rsx_fp, &(I->second));
  				return std::forward_as_tuple(I->second, true);
  			}
-@@ -294,6 +374,8 @@ protected:
+@@ -294,6 +397,8 @@ protected:
  			backend_traits::recompile_fragment_program(rsx_fp, *new_shader, m_next_id++);
  		}
  
@@ -7628,7 +7653,7 @@ index c3d0821..09cdead 100644
  		rsx::program_cache_hint_t::cache_fragment_program(cache_hint, rsx_fp, new_shader);
  		return std::forward_as_tuple(*new_shader, false);
  	}
-@@ -303,6 +385,32 @@ public:
+@@ -303,6 +408,32 @@ public:
  	~program_state_cache()
  	{}
  
@@ -7661,23 +7686,23 @@ index c3d0821..09cdead 100644
  	template<typename... Args>
  	pipeline_data_type get_graphics_pipeline(
  		rsx::program_cache_hint_t* cache_hint,
-@@ -363,6 +471,7 @@ public:
+@@ -363,6 +494,7 @@ public:
  			{
  				if (!pipeline)
  				{
-+					r2_log_failed_pipeline(key); // R2PORT: once per pipeline (the placeholder blocks a relink)
++					r2_on_failed_pipeline(key); // R2PORT: once per pipeline (the placeholder blocks a relink; issue #16: not after a preload fault)
  					return nullptr;
  				}
  
-@@ -381,6 +490,7 @@ public:
+@@ -381,6 +513,7 @@ public:
  			{
  				if (!pipeline)
  				{
-+					r2_log_failed_pipeline(key); // R2PORT: once per pipeline (the placeholder blocks a relink)
++					r2_on_failed_pipeline(key); // R2PORT: once per pipeline (the placeholder blocks a relink; issue #16: not after a preload fault)
  					return nullptr;
  				}
  
-@@ -421,6 +531,8 @@ public:
+@@ -421,6 +554,8 @@ public:
  		notify_pipeline_compiled = {};
  		m_fragment_shader_cache.clear();
  		m_vertex_shader_cache.clear();
@@ -25481,10 +25506,10 @@ index 0000000..41cee9c
 +}
 diff --git a/rpcs3/Emu/RSX/VK/VKR2Preload.cpp b/rpcs3/Emu/RSX/VK/VKR2Preload.cpp
 new file mode 100644
-index 0000000..221e595
+index 0000000..800c4e3
 --- /dev/null
 +++ b/rpcs3/Emu/RSX/VK/VKR2Preload.cpp
-@@ -0,0 +1,427 @@
+@@ -0,0 +1,455 @@
 +// R2PORT (GitHub issue #10): breadcrumb, quarantine and SEH guard of the shader preload (see port_r2preload.h).
 +
 +#include "Emu/RSX/port_r2preload.h"
@@ -25794,6 +25819,11 @@ index 0000000..221e595
 +		return g_faulted.load(std::memory_order_relaxed);
 +	}
 +
++	bool relink_after_preload_fault()
++	{
++		return ::r2pipe::preload_fault_relink(t_name != nullptr);
++	}
++
 +#ifdef _WIN32
 +	namespace
 +	{
@@ -25878,6 +25908,26 @@ index 0000000..221e595
 +#endif
 +	}
 +
++#ifdef _WIN32
++	namespace
++	{
++		// PORT_PRELOAD_FAULT_TEST=N (test only, default 0): the next N graphics pipeline links on preload threads raise an
++		// access violation in place of the driver call, through the same guard as a real driver fault (issue #16 A-B)
++		bool fault_test(const char* stage)
++		{
++			static std::atomic<long> s_left{::r2pipe::env_int("PORT_PRELOAD_FAULT_TEST", 0)};
++			if (!t_name || !stage || (std::strncmp(stage, "rt:gfx", 6) != 0 && std::strcmp(stage, "rt:gpl_link") != 0)) return false;
++			return s_left.load(std::memory_order_relaxed) > 0 && s_left.fetch_sub(1, std::memory_order_relaxed) > 0;
++		}
++
++		long fault_test_raise(void*)
++		{
++			RaiseException(EXCEPTION_ACCESS_VIOLATION, 0, 0, nullptr);
++			return 0;
++		}
++	}
++#endif
++
 +	bool driver_call(long (*fn)(void*), void* ctx, long* result, bool guard, const char* stage)
 +	{
 +		std::unique_lock<std::mutex> lock(g_driver_lock, std::defer_lock);
@@ -25885,6 +25935,9 @@ index 0000000..221e595
 +		const char* const prev = t_stage;
 +		if (stage) stage_set(stage);
 +		bool ok = true;
++#ifdef _WIN32
++		if (guard && g_use_seh && fault_test(stage)) fn = fault_test_raise;
++#endif
 +		if (guard && g_use_seh) ok = guarded_call(fn, ctx, result);
 +		else *result = fn(ctx);
 +		if (stage) stage_set(prev);
@@ -51101,10 +51154,10 @@ index 0000000..6083c33
 +}
 diff --git a/rpcs3/Emu/RSX/port_r2pipe.h b/rpcs3/Emu/RSX/port_r2pipe.h
 new file mode 100644
-index 0000000..3de0950
+index 0000000..f5cbf58
 --- /dev/null
 +++ b/rpcs3/Emu/RSX/port_r2pipe.h
-@@ -0,0 +1,406 @@
+@@ -0,0 +1,411 @@
 +#pragma once
 +
 +// R2PORT pipeline-stutter work (pure logic, unit tested offline in scratch\enginetest via
@@ -51303,6 +51356,11 @@ index 0000000..3de0950
 +	// PORT_PIPE_SERIAL=1/0, default on AMD (PCI vendor 0x1002; issue #10, driver faults with concurrent creates
 +	// on the shared VkPipelineCache).
 +	inline bool pipe_serialize(uint32_t vendor_id) { return env_int("PORT_PIPE_SERIAL", vendor_id == 0x1002 ? 1 : 0) != 0; }
++
++	// Issue #16: a pipeline whose link faulted on a preload thread is dropped from the program cache (not kept as a
++	// failed entry whose draws are skipped all session), so the draw that needs it links it during play.
++	// PORT_PRELOAD_FAULT_RELINK=0: kept failed (old rule). Links outside the preload always stay failed.
++	inline bool preload_fault_relink(bool preload_link) { return preload_link && env_int("PORT_PRELOAD_FAULT_RELINK", 1) != 0; }
 +
 +	// Breadcrumb / quarantine name of a Fossilize replay pipeline ("foz_" + 16 hex digits of its hash)
 +	inline std::string foz_entry_name(uint64_t hash)
@@ -51513,10 +51571,10 @@ index 0000000..3de0950
 +}
 diff --git a/rpcs3/Emu/RSX/port_r2preload.h b/rpcs3/Emu/RSX/port_r2preload.h
 new file mode 100644
-index 0000000..ecb2dba
+index 0000000..b5a51aa
 --- /dev/null
 +++ b/rpcs3/Emu/RSX/port_r2preload.h
-@@ -0,0 +1,80 @@
+@@ -0,0 +1,86 @@
 +#pragma once
 +
 +// R2PORT (GitHub issue #10): crash safety of the start-up / background shader preload (VK/VKR2Preload.cpp).
@@ -51528,7 +51586,8 @@ index 0000000..ecb2dba
 +//  - SEH guard (PORT_PRELOAD_SEH, default on, Windows): a fault inside vkCreate*Pipelines of the boot and
 +//    background preload, the Fossilize replay and the game's own pipelines built during play (render thread and
 +//    compiler threads) is caught, logged and the pipeline skipped (the draw that needs it is skipped); the preload
-+//    and the replay then stop for the session;
++//    and the replay then stop for the session. Issue #16: a pipeline that faulted on a preload thread is not kept
++//    as failed (PORT_PRELOAD_FAULT_RELINK, default on): its draw links it during play, guarded the same way;
 +//  - AMD serialisation (PORT_PIPE_SERIAL, default on AMD): those pipeline creations run one at a time, and so do
 +//    the upscaler / frame generation SDK context creations (stage_scope);
 +//  - stage breadcrumb (issue #23): pipelines built outside the preload (render / compiler threads, upscaler, SDK
@@ -51574,6 +51633,11 @@ index 0000000..ecb2dba
 +
 +	// A guarded pipeline creation faulted this session: the preload and the Fossilize replay stop
 +	bool faulted();
++
++	// Issue #16: true on a preload thread (inside a link_scope) with PORT_PRELOAD_FAULT_RELINK on (default). A
++	// pipeline whose preload link failed is then dropped from the program cache instead of kept as a failed entry,
++	// so the draw that needs it links it during play (guarded there too) rather than being skipped all session.
++	bool relink_after_preload_fault();
 +
 +	// *result = fn(ctx) under the SEH guard. False when it faulted: logged, current entry quarantined, faulted() set
 +	bool guarded_call(long (*fn)(void*), void* ctx, long* result);
