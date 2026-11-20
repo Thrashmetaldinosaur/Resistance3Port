@@ -8,6 +8,11 @@ A native PC port of *Resistance 3* (PS3) built by static recompilation: the game
 
 This is a **beta**. Only the intro and the opening Haven level have been played through so far, on one PC (Ryzen 5 5600X, GeForce RTX 5070, Windows 11). Expect bugs, and please report them (see *Reporting problems*).
 
+## 0.3.1-beta (unreleased)
+
+### Project
+- **CI and release tooling**, contributed by @undecuple: a release build workflow that builds Setup, the zips and checksums with `scripts\package_beta.ps1` on a Windows runner and only ever creates a *draft* release from a version tag (PR #2); a check that no game files and no unexpected large files are committed, using the same patterns as `package_beta.ps1` (PR #19); a gitleaks secrets scan (PR #20); Dependabot updates for the pinned GitHub Actions (PR #21); and `ps3recomp/UPSTREAM_BASE`, which records the upstream ps3recomp commit range the original import came from (PR #22).
+
 ## 0.3.0-beta
 
 Performance and stability update. Items marked *untested* or *not yet tested in game* are new and have not been played with yet; please report how they work.
