@@ -84,6 +84,8 @@ jobs:
 
       - name: Launcher.exe
         # The same commands as the launcher step of build.bat (clang-cl from the runner's LLVM, MSVC libraries from Visual Studio).
+        # The game itself is never built here (it needs the player's game files). LLVM 22 is only needed for the PGO
+        # game build on the player's PC (pgo\r3.profdata, which ships as a tracked file); the launcher is built without it.
         shell: cmd
         run: |
           set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
@@ -128,8 +130,8 @@ jobs:
           if-no-files-found: error
 
   draft:
-    # Tag pushes only; a manual run just leaves the artifact above.
-    if: github.ref_type == 'tag'
+    # Tag pushes only; a manual run just leaves the artifact above (also when "Run workflow" is started from a tag).
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
