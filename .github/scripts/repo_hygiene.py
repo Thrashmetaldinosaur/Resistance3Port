@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Repository hygiene check over `git ls-files`.
 
-1. Fails on any tracked path that matches a game-file deny pattern.
+1. Fails on any tracked path that matches a game-file deny pattern (the $strict
+   list of scripts/package_beta.ps1, read from that file).
 2. Fails on any tracked file over MAX_BYTES unless its path is in
    .github/large-file-allowlist.txt.
 
@@ -15,23 +16,37 @@ import sys
 
 MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 
-# These patterns mirror the $strict list in scripts/package_beta.ps1 (same regular
-# expressions, same labels). PowerShell -match is case-insensitive, so re.IGNORECASE
-# is used here. If that list changes, change this one too.
-STRICT = {
-    'game data / ISO-derived': r'(^|/)(PS3_GAME|USRDIR|TROPDIR|gamefiles|gamedata|savedata)(/|$)|(^|/)EBOOT\.(BIN|elf)$|\.(elf|self|sprx|sdat|edat|iso|pkg|psarc|pup|rap)$|TROPHY\.TRP$',
-    'generated game code': r'(^|/)recompiled|^project/spu/[^/]+/|(^|/)lle/',
-    'build output': r'(^|/)build[^/]*/|(^|/)CMakeFiles/|\.(obj|exp|ilk|pdb|ninja)$|\.pdb\.syms$|(^|/)obj/',
-    'caches / logs / dumps': r'\.foz$|(^|/)shadercache/|(^|/)logs/|\.log$|\.dmp$|(^|/)(crash|dumps?)/|(^|/)(rsxcap|fpval|cache)/',
-    'user settings / saves': r'(^|/)settings\.(ini|bat)$|portable\.txt$|trophies\.json$|mouselook_r2\.cfg$',
-    'downloaded SDKs': r'^tools/(dlss|xess|streamline|ffmpeg_bin)/|(^|/)(nvngx_dlssg?|sl\.\w+|NvLowLatencyVk|libxess|avcodec-\d+|avutil-\d+|swresample-\d+|r2_dlss|rfom_dlss)\.dll$|nvsdk_ngx',
-    'RPCS3 key_vault': r'key_vault',
-}
-COMPILED = {k: re.compile(v, re.IGNORECASE) for k, v in STRICT.items()}
+PACKAGE_SCRIPT = os.path.join('scripts', 'package_beta.ps1')
+
+
+def load_strict(root):
+    """Reads the $strict deny list straight from scripts/package_beta.ps1 (the only copy).
+
+    Only the text is parsed; the script is never run. Each entry is a line
+    `'label' = 'regex'` inside `$strict = [ordered]@{ ... }`. PowerShell -match is
+    case-insensitive, so re.IGNORECASE is used here.
+    """
+    text = open(os.path.join(root, PACKAGE_SCRIPT), encoding='utf-8-sig').read()
+    block = re.search(r'^\$strict\s*=\s*\[ordered\]@\{\s*$(.*?)^\}', text, re.MULTILINE | re.DOTALL)
+    if not block:
+        raise SystemExit('ERROR: no $strict = [ordered]@{ ... } block in ' + PACKAGE_SCRIPT)
+    entry = re.compile(r"^\s*'((?:[^']|'')*)'\s*=\s*'((?:[^']|'')*)'\s*$")
+    strict = {}
+    for line in block.group(1).splitlines():
+        if not line.strip() or line.strip().startswith('#'):
+            continue
+        m = entry.match(line)
+        if not m:
+            raise SystemExit('ERROR: unexpected line in the $strict block of %s: %s' % (PACKAGE_SCRIPT, line.strip()))
+        strict[m.group(1).replace("''", "'")] = re.compile(m.group(2).replace("''", "'"), re.IGNORECASE)
+    if not strict:
+        raise SystemExit('ERROR: the $strict block of %s is empty' % PACKAGE_SCRIPT)
+    return strict
 
 
 def main():
     root = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.getcwd()
+    strict = load_strict(root)
     out = subprocess.run(['git', '-C', root, 'ls-files', '-z'], check=True, capture_output=True).stdout
     paths = [p.decode('utf-8', 'surrogateescape') for p in out.split(b'\0') if p]
 
@@ -46,7 +61,7 @@ def main():
     errors = []
     big_seen = set()
     for p in paths:
-        for label, rx in COMPILED.items():
+        for label, rx in strict.items():
             if rx.search(p):
                 errors.append('game-file pattern [%s]: %s' % (label, p))
                 break

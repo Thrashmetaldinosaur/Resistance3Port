@@ -1,7 +1,7 @@
 name: repo-hygiene
 
 # Fails when a tracked path matches the game-file deny patterns of scripts/package_beta.ps1
-# ($strict), or a tracked file is over 5 MB and not in .github/large-file-allowlist.txt.
+# ($strict, read from that script as text), or a tracked file is over 5 MB and not in .github/large-file-allowlist.txt.
 # Reads only file names and sizes; no repository code is run.
 
 on:

@@ -204,6 +204,7 @@ $set = @($tracked + $extra | Sort-Object -Unique | Where-Object { Test-Path -Lit
 
 # ... checked against a stricter list. Anything hit here would ship in the installer: fix the
 # installer's block list or .gitignore (or untrack the file) before releasing.
+# .github/scripts/repo_hygiene.py (CI) reads this block as text: keep one 'label' = 'regex' entry per line.
 $strict = [ordered]@{
     'game data / ISO-derived'   = '(^|/)(PS3_GAME|USRDIR|TROPDIR|gamefiles|gamedata|savedata)(/|$)|(^|/)EBOOT\.(BIN|elf)$|\.(elf|self|sprx|sdat|edat|iso|pkg|psarc|pup|rap)$|TROPHY\.TRP$'
     'generated game code'       = '(^|/)recompiled|^project/spu/[^/]+/|(^|/)lle/'
