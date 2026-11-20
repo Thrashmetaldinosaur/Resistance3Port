@@ -1,5 +1,29 @@
 {
  "funcs": {
+  "func_006CAB6C": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_006CAB6C(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" void r3_spin_relax_w18(void);   /* R3: wait-until-(handle+0x18) spin gives up the core (stubs.cpp, R3_SPIN_RELAX_W18) */",
+     "void func_006CAB6C(ppu_context* ctx) {"
+    ]
+   },
+   {
+    "at": 69,
+    "ctx": "        ctx->gpr[31] = R_31 = R_31 | R_31;",
+    "rm": [
+     "        ctx->gpr[4] = R_4 = vm_read16(R_3 + 0x18);"
+    ],
+    "add": [
+     "        r3_spin_relax_w18();",
+     "        ctx->gpr[4] = R_4 = vm_read16(R_3 + 0x18);"
+    ]
+   }
+  ],
   "func_00736BAC": [
    {
     "at": 0,
@@ -1014,6 +1038,30 @@
     ]
    }
   ],
+  "func_0032D788": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_0032D788(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" uint32_t r3_hud_msg_patch(ppu_context* ctx, uint32_t save[8]);   /* R3: HUD stick prompts (type 14) -> key / Xbox help text (stubs.cpp) */",
+     "extern \"C\" void r3_hud_msg_restore(uint32_t args, const uint32_t save[8]);",
+     "extern \"C\" uint32_t r3_menu_rows_append(ppu_context* ctx);   /* R3: PC SETTINGS tab / rows in the Options menu (r3_menurows.cpp) */",
+     "extern \"C\" void r3_menu_rows_after(ppu_context* ctx, uint32_t menu);",
+     "static void func_0032D788_body(ppu_context* ctx);",
+     "void func_0032D788(ppu_context* ctx) {",
+     "        const uint32_t menu_rows = r3_menu_rows_append(ctx);",
+     "        uint32_t sv[8]; const uint32_t args = r3_hud_msg_patch(ctx, sv);",
+     "        func_0032D788_body(ctx);",
+     "        if (args) r3_hud_msg_restore(args, sv);",
+     "        if (menu_rows) r3_menu_rows_after(ctx, menu_rows);",
+     "}",
+     "static void func_0032D788_body(ppu_context* ctx) {"
+    ]
+   }
+  ],
   "func_003710B0": [
    {
     "at": 0,
@@ -1095,6 +1143,254 @@
      "extern \"C\" int r3_occ_wait(ppu_context* ctx);   /* R3: occlusion report wait (project/r3_hot.cpp, R3_OCC_SKIP) */",
      "void func_0074EAB0(ppu_context* ctx) {",
      "        if (r3_occ_wait(ctx)) return;"
+    ]
+   }
+  ],
+  "func_001600FC": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_001600FC(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_fx_dof_aim_skip(uint32_t player);   /* R3: R3_FX_DOF=aim, no aim-down-sights DOF node (r3_pcextra.cpp) */",
+     "void func_001600FC(ppu_context* ctx) {"
+    ]
+   },
+   {
+    "at": 44,
+    "ctx": "        { double a = ctx->fpr[1]; double b = ctx->fpr[31]; uint32_t cr_val = (a != a || b != b) ? 1 : (a < b) ? 8 : (a > b) ? 4 : 2; ctx->cr = R_cr = (R_cr & ~(0xFu << 28)) | (cr_val << 28); }",
+    "rm": [
+     "        if (((R_cr >> 30) & 1)) goto loc_001601B0;"
+    ],
+    "add": [
+     "        if (((R_cr >> 30) & 1) && !r3_fx_dof_aim_skip((uint32_t)R_31)) goto loc_001601B0;"
+    ]
+   }
+  ],
+  "func_00160108": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00160108(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_fx_dof_aim_skip(uint32_t player);   /* R3: R3_FX_DOF=aim, no aim-down-sights DOF node (r3_pcextra.cpp) */",
+     "void func_00160108(ppu_context* ctx) {"
+    ]
+   },
+   {
+    "at": 38,
+    "ctx": "        { double a = ctx->fpr[1]; double b = ctx->fpr[31]; uint32_t cr_val = (a != a || b != b) ? 1 : (a < b) ? 8 : (a > b) ? 4 : 2; ctx->cr = R_cr = (R_cr & ~(0xFu << 28)) | (cr_val << 28); }",
+    "rm": [
+     "        if (((R_cr >> 30) & 1)) goto loc_001601B0;"
+    ],
+    "add": [
+     "        if (((R_cr >> 30) & 1) && !r3_fx_dof_aim_skip((uint32_t)R_31)) goto loc_001601B0;"
+    ]
+   }
+  ],
+  "func_00B558E8": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00B558E8(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_hot_memcpy(ppu_context* ctx);   /* R3: native memcpy (project/r3_hot_native.cpp, R3_HOT_NATIVE) */",
+     "void func_00B558E8(ppu_context* ctx) {",
+     "        if (r3_hot_memcpy(ctx)) return;"
+    ]
+   }
+  ],
+  "func_00B604D8": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00B604D8(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_hot_memset(ppu_context* ctx);   /* R3: native memset (project/r3_hot_native.cpp, R3_HOT_NATIVE) */",
+     "void func_00B604D8(ppu_context* ctx) {",
+     "        if (r3_hot_memset(ctx)) return;"
+    ]
+   }
+  ],
+  "func_00B5D514": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00B5D514(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_hot_strcmp(ppu_context* ctx);   /* R3: native strcmp (project/r3_hot_native.cpp, R3_HOT_NATIVE) */",
+     "void func_00B5D514(ppu_context* ctx) {",
+     "        if (r3_hot_strcmp(ctx)) return;"
+    ]
+   }
+  ],
+  "func_00B5D668": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00B5D668(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_hot_strcpy(ppu_context* ctx);   /* R3: native strcpy (project/r3_hot_native.cpp, R3_HOT_NATIVE) */",
+     "void func_00B5D668(ppu_context* ctx) {",
+     "        if (r3_hot_strcpy(ctx)) return;"
+    ]
+   }
+  ],
+  "func_00B605B0": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00B605B0(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_hot_memcmp(ppu_context* ctx);   /* R3: native memcmp (project/r3_hot_native.cpp, R3_HOT_NATIVE) */",
+     "void func_00B605B0(ppu_context* ctx) {",
+     "        if (r3_hot_memcmp(ctx)) return;"
+    ]
+   }
+  ],
+  "func_00383E08": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00383E08(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_menu_rows_change(ppu_context* ctx);   /* R3: changeOption for the PC settings rows (r3_menurows.cpp) */",
+     "static void func_00383E08_body(ppu_context* ctx);",
+     "void func_00383E08(ppu_context* ctx) {",
+     "        r3_menu_rows_change(ctx);",
+     "        func_00383E08_body(ctx);",
+     "}",
+     "static void func_00383E08_body(ppu_context* ctx) {"
+    ]
+   }
+  ],
+  "func_00799EF0": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_00799EF0(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" void r3_frustum_hook(ppu_context* ctx);   /* R3: ultrawide Hor+ / shadow-safe FOV at the camera frustum setter (r3_patches.cpp) */",
+     "void func_00799EF0(ppu_context* ctx) {",
+     "        r3_frustum_hook(ctx);"
+    ]
+   }
+  ],
+  "func_0079C918": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_0079C918(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" void r3_lod_hook(ppu_context* ctx);   /* R3: LOD distance scale + FOV compensation (r3_patches.cpp, R3_LOD_SCALE) */",
+     "void func_0079C918(ppu_context* ctx) {",
+     "        r3_lod_hook(ctx);"
+    ]
+   }
+  ],
+  "func_0079C810": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_0079C810(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" void r3_lod_ret_hook(ppu_context* ctx);   /* R3: LOD scale on the returned value (r3_patches.cpp, R3_LOD_SCALE) */",
+     "void func_0079C810(ppu_context* ctx) {"
+    ]
+   },
+   {
+    "at": 63,
+    "ctx": "        ctx->fpr[1] = ppu_fp_single(ppu_fmul(ctx->fpr[1], ctx->fpr[30]));",
+    "rm": [],
+    "add": [
+     "        ctx->gpr[31] = R_31; r3_lod_ret_hook(ctx);"
+    ]
+   }
+  ],
+  "func_001B0EC0": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_001B0EC0(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" void r3_move_start_hook(ppu_context* ctx, uint64_t vel_zero, uint64_t state); extern \"C\" void r3_move_note_entry(uint64_t entry);   /* R3: walk-start step at 30 fps size + [move-lock] log (r3_patches.cpp, R3_MOVE_START_FIX) */",
+     "void func_001B0EC0(ppu_context* ctx) {"
+    ]
+   },
+   {
+    "at": 60,
+    "ctx": "loc_001B0F3C:",
+    "rm": [
+     "        ctx->gpr[3] = R_3 = R_29 | 0x0;"
+    ],
+    "add": [
+     "        r3_move_note_entry(R_30);",
+     "        ctx->gpr[3] = R_3 = R_29 | 0x0;"
+    ]
+   },
+   {
+    "at": 229,
+    "ctx": "        { uint32_t tmp = vm_read32_fast(R_1 + 0xE0); float ftmp; memcpy(&ftmp, &tmp, 4); ctx->fpr[1] = ftmp; }",
+    "rm": [
+     "        ctx->lr = R_lr = 0x001B11B8; func_00187130(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;"
+    ],
+    "add": [
+     "        r3_move_start_hook(ctx, R_27, R_31);",
+     "        ctx->lr = R_lr = 0x001B11B8; func_00187130(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;"
+    ]
+   }
+  ],
+  "func_003D6810": [
+   {
+    "at": 0,
+    "ctx": null,
+    "rm": [
+     "void func_003D6810(ppu_context* ctx) {"
+    ],
+    "add": [
+     "extern \"C\" int r3_movie_seen_hook(int seen);   /* R3: skip unwatched movies: the movie update's seen check (r3_pcextra.cpp, R3_CUTSCENE_SKIP_ALL) */",
+     "extern \"C\" int r3_movie_skip_btn_hook(int pressed);   /* R3: the same function's skip-button check (r3_pcextra.cpp, PORT_SKIP_FORCE) */",
+     "void func_003D6810(ppu_context* ctx) {"
+    ]
+   },
+   {
+    "at": 123,
+    "ctx": "        ctx->lr = R_lr = 0x003D6994; func_003C84F0(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+    "rm": [],
+    "add": [
+     "        ctx->gpr[3] = R_3 = (uint64_t)(int64_t)r3_movie_seen_hook((int32_t)R_3);"
+    ]
+   },
+   {
+    "at": 129,
+    "ctx": "        ctx->lr = R_lr = 0x003D69A8; func_0019D500(ctx); DRAIN_TRAMPOLINE(ctx); _RCX_RL;",
+    "rm": [],
+    "add": [
+     "        ctx->gpr[3] = R_3 = (uint64_t)(int64_t)r3_movie_skip_btn_hook((int32_t)R_3);"
     ]
    }
   ]

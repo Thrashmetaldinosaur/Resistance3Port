@@ -19,6 +19,7 @@
 /logs/
 /rsxcap/
 /Launcher.exe
+/HDUIPack.exe
 /settings.bat
 /settings.ini
 *.obj
@@ -67,8 +68,39 @@ logs_build_*.txt
 
 # Setup.exe is attached to the GitHub release, not committed
 /Setup.exe
+# build tools Setup put into this folder (portable mode) and the list of what it installed
+/tools_cache/
 /scratch/RSXFIFOCommands*.pdf
 
 # local save backups (launcher) and the NVIDIA Streamline SDK that Setup downloads after licence acceptance
 /save_backups/
 /tools/streamline/
+
+# online credentials (online.ini.example is the template)
+/online.ini
+# HD UI pack (tools\hd_ui_pack.py): texture dumps and the upscaler/models downloaded on the user's PC
+/texdump/
+/tools/upscaler/
+# PGO: pgo\<rN>.profdata is committed (build.bat uses it); training output and build stamps stay local
+/pgo/raw/
+/pgo/run_*/
+/pgo/*.profraw
+/pgo/*.sha256
+# local QA / crash-report work, save backups and replay captures: never committed
+/crash_report_work/
+/saves_backup/
+/tools/qa/runs/
+/tools/replay/
+# PGO raw profiles (any folder) and old training runs
+*.profraw
+/pgo/raw*/
+# developer-only helper scripts (the shipped ones are run.bat and Setup.bat)
+/safe_mode.bat
+/renderdoc.bat
+/try_r3.bat
+/safe_half_*.bat
+/build_pgo.bat
+# leftovers of old local checkouts (nothing in 3rdparty\ is part of the port)
+/3rdparty/
+# mouse-look calibration the game writes at run time (player data, kept by tools\update.ps1)
+/mouselook_r3.cfg

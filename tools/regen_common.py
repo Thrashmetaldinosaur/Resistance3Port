@@ -14,7 +14,7 @@ def run(cmd, **kw):
         raise SystemExit('FAILED: ' + ' '.join(cmd[:4]))
     return r.stdout
 
-def ppu(port, tk, elf, outdir, name, chunks, post_passes, hooks, work):
+def ppu(port, tk, elf, outdir, name, chunks, post_passes, hooks, work, reglocals=0):
     print('[%s] lifting PPU code...' % name, flush=True)
     od = os.path.join(work, name + '_an')
     run([sys.executable, os.path.join(tk, 'ppu_loader.py'), elf, '-o', od])
@@ -38,6 +38,18 @@ def ppu(port, tk, elf, outdir, name, chunks, post_passes, hooks, work):
             open(tf, 'w', encoding='utf-8', errors='surrogateescape').write(s)
     run([sys.executable, os.path.join(HERE, 'ppu_hooks.py'), 'apply', tmp, hooks])
     shutil.copy(os.path.join(HERE, 'hooks', 'ppu_hle_nids.cpp'), os.path.join(tmp, 'ppu_hle_nids.cpp'))
+    if reglocals:
+        # experimental (scratch/cpu_reglocals.md): lazy write-back + liveness-aware
+        # spill/reload around calls; L>=2 uses whole-program preserve/read summaries
+        print('[%s] reglocals L%d pass...' % (name, reglocals), flush=True)
+        lz = os.path.join(HERE, 'regcache_lazy.py')
+        opts = ['--lazy-wb', '--reglocals=%d' % reglocals]
+        if reglocals >= 2:
+            summ = os.path.join(work, name + '_reglocals_summary.json')
+            run([sys.executable, lz, '--summarize', summ] + chunksf)
+            opts.append('--summary=' + summ)
+        for f in chunksf:
+            run([sys.executable, lz, f, f] + opts)
     dst = os.path.join(port, outdir)
     if os.path.isdir(dst): shutil.rmtree(dst)
     shutil.copytree(tmp, dst)
@@ -47,6 +59,7 @@ def spu_post(f, hooks):
     run([sys.executable, os.path.join(HERE, 'spu_regcache.py'), f, f])
     run([sys.executable, os.path.join(HERE, 'spu_directhop.py'), f])
     run([sys.executable, os.path.join(HERE, 'spu_hooks.py'), 'apply', 'post', f, hooks])
+    run([sys.executable, os.path.join(HERE, 'spu_w0.py'), f])
 
 def fix_includes(d):
     for f in glob.glob(os.path.join(d, 'spu_recomp.*')):

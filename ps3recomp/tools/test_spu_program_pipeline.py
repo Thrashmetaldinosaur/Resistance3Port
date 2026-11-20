@@ -72,7 +72,10 @@ class Pipeline(unittest.TestCase):
         channels = (runtime / 'spu_channels.c').read_text()
         channels = channels[channels.index('typedef void (*spu_fn)'):
                             channels.index('/* Which image registered')]
-        (self.root / 'registry.c').write_text('#include "spu_context.h"\n#include <stdio.h>\n' + channels)
+        # The registry slice uses LONG / InterlockedIncrement (forced-interp epoch).
+        (self.root / 'registry.c').write_text('#ifdef _WIN32\n#include <windows.h>\n#else\n'
+                                              '#include "../platform/win32_compat.h"\n#endif\n'
+                                              '#include "spu_context.h"\n#include <stdio.h>\n' + channels)
         return runtime
 
     def test_exact_dedup_and_same_address_isolation(self):

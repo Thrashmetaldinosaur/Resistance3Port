@@ -7,6 +7,7 @@
  */
 
 #include "sysPrxForUser.h"
+#include "../video/rsx_featcov.h"   /* rsx_featcov_dump on the fast exit */
 #include "../../runtime/memory/vm.h"
 #include <ps3emu/guest_call.h>
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_write32: translate + byte-swap */
@@ -16,6 +17,8 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include "ps3emu/log_first.h"
+#include "ps3emu/milestone.h"    /* ps3_ms_dump on the fast exit */
+#include "ps3emu/ps3_ftrace.h"   /* ps3_ft_dump on the fast exit */
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -193,6 +196,27 @@ void sys_process_exit(s32 exitcode)
             Sleep(1000);
 #else
             struct timespec ts = {1,0}; nanosleep(&ts,0);
+#endif
+        }
+    }
+    {
+        /* exit() ran the CRT's atexit handlers and static destructors while the
+         * RSX, Vulkan and SPU threads were still running: heap corruption
+         * (0xC0000374) and a crash report on a clean guest exit. Leave the way
+         * the window-close path does. PS3_EXIT_CRT=1: the old exit().
+         * The fast exit skips atexit: the milestone counts and the ftrace dump
+         * (both idempotent) run here instead; the boot smoke test and the PGO
+         * build set PS3_EXIT_CRT=1 for their own atexit handlers. */
+        const char* ec = getenv("PS3_EXIT_CRT");
+        if (!(ec && *ec && *ec != '0')) {
+            ps3_ms_dump();
+            if (g_ps3_ft.buf) ps3_ft_dump();
+            rsx_featcov_dump("exit");
+            fflush(NULL);
+#ifdef _WIN32
+            ExitProcess((UINT)exitcode);
+#else
+            _exit(exitcode);
 #endif
         }
     }

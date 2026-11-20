@@ -6132,13 +6132,14 @@ enum { VK_AS_NONE = 0, VK_AS_PENDING, VK_AS_READY, VK_AS_FAILED };
 #define VK_ASYNC_QUEUE   16384u
 #define VK_ASYNC_THREADS 12u
 
+#include "../../runtime/platform/port_hires_sleep.h"   /* port_sleep_1ms (perf final pass) */
 #ifdef _WIN32
 typedef CONDITION_VARIABLE vk_cond;
 #define vk_cond_init(c)       InitializeConditionVariable(c)
 #define vk_cond_wait(c, m)    SleepConditionVariableSRW((c), (m), INFINITE, 0)
 #define vk_cond_signal(c)     WakeConditionVariable(c)
 #define vk_cond_broadcast(c)  WakeAllConditionVariable(c)
-#define vk_async_yield()      Sleep(1)
+#define vk_async_yield()      port_sleep_1ms()   /* hi-res; PORT_HIRES_SLEEP=0: Sleep(1) */
 typedef HANDLE vk_thread_t;
 #else
 #include <sched.h>

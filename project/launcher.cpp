@@ -35,12 +35,15 @@ namespace Gdiplus { using std::min; using std::max; }
 #include <vector>
 #include <functional>
 
+#include "port_ini_migrate.h"
 #include "r2_autoconfig.h"
 #include "r3_trophy_data.h"
 #include <shlobj.h>
 #include <tlhelp32.h>
 #include <intrin.h>
 #include <immintrin.h>
+#include <mmdeviceapi.h>
+#include <audioclient.h>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "gdiplus.lib")
@@ -69,7 +72,7 @@ struct Setting {
     // data-driven options only (add_option): settings.bat writes `set "env=value"` (nothing for ""),
     const char* env = nullptr;
     int section = SEC_NONE;
-    const char* only_renderer = nullptr;      // greyed out unless this renderer is selected ("rpcs3" / "vulkan")
+    const char* only_renderer = nullptr;      // greyed out unless this renderer is selected ("rpcs3" / "vulkan" / "rpcs3|d3d12")
     const char* tier_val[4] = {};            // recommended value for the Low/Medium/High/Ultra tier (nullptr = def)
 };
 
@@ -88,10 +91,16 @@ static std::vector<Setting> g_set = {
     { "fps", "Frame rate",
       "The PS3 game runs at 30 fps. 60 fps doubles how often the game updates and draws; the game measures "
       "real time each frame, so it does not play faster. Needs about twice the CPU and GPU time. "
-      "120 / 144 / Match display / Uncapped go further (uncapped: as fast as the PC allows; "
-      "best with VSync Auto or Off and a G-Sync / FreeSync monitor).",
-      { {"30 fps  (PS3 original)", "30"}, {"60 fps", "60"}, {"120 fps", "120"}, {"144 fps", "144"},
-        {"Match display refresh", "refresh"}, {"Just under refresh  (G-Sync / FreeSync)", "vrr"}, {"Uncapped", "0"} }, 1 },
+      "40 / 45 suit 120 Hz / 90 Hz screens and handhelds. 72 to 240 / Match display / Uncapped go further (uncapped: as fast as the PC allows; "
+      "best with VSync Auto or Off and a G-Sync / FreeSync monitor). WARNING: above about 75 fps Resistance 3's "
+      "engine can miss the left stick (standing still you may have to jump before you can move; ladders need "
+      "retries). 60 is recommended.",
+      { {"30 fps  (PS3 original)", "30"}, {"40 fps  (Steam Deck / 120 Hz screens)", "40"}, {"45 fps  (90 Hz screens)", "45"},
+        {"60 fps  (recommended)", "60"}, {"72 fps  (144 Hz screens)", "72"}, {"90 fps  (may break movement)", "90"},
+        {"120 fps  (may break movement)", "120"}, {"144 fps  (may break movement)", "144"}, {"165 fps  (may break movement)", "165"},
+        {"240 fps  (may break movement)", "240"}, {"Match display refresh  (above 75: may break movement)", "refresh"},
+        {"Just under refresh  (G-Sync / FreeSync; above 75: may break movement)", "vrr"},
+        {"Uncapped  (may break movement)", "0"} }, 3 },
     { "vsync", "VSync",
       "Off is smoothest with a G-Sync / FreeSync monitor and has the lowest input lag. On removes tearing on "
       "other screens. Adaptive syncs when the game keeps up and tears instead of stuttering when it doesn't. "
@@ -133,10 +142,14 @@ static std::vector<Setting> g_set = {
       "screen and anti-aliasing is off.",
       { {"Off", "0"}, {"Low", "0.25"}, {"Medium", "0.5"}, {"High", "0.8"} }, 1 },
     { "renderer", "Renderer",
-      "Compatible draws through RPCS3's PS3 graphics emulation - the most tested. Native Vulkan "
-      "(experimental) draws the game's graphics directly on your GPU, which is faster on weaker PCs "
-      "but may still show glitches.",
-      { {"Compatible  (RPCS3)", "rpcs3"}, {"Native Vulkan  (experimental)", "vulkan"} }, 0 },
+      "Compatible draws through RPCS3's PS3 graphics emulation - use this one. Direct3D 12 is NOT WORKING YET: "
+      "an early work-in-progress renderer with many graphics bugs and much lower performance, included only for "
+      "testing. Upscaling, frame generation and some effects are not available there. If your PC can't run "
+      "Direct3D 12 the game uses Compatible instead.",
+      // The native Vulkan renderer is hidden (code kept): register_options() adds it back only with
+      // R3_RENDERER_FORCE_NATIVE=1; a saved "vulkan" / "native" loads as Compatible (main.cpp r3_renderer_migrate).
+      // Direct3D 12 (experimental) is offered independently of that hide (main.cpp rsx_d3e_wanted).
+      { {"Compatible  (RPCS3)", "rpcs3"}, {"Direct3D 12  (not working yet - testing only)", "d3d12"} }, 0 },
     { "cpu", "CPU profile",
       "How the game uses your processor. Auto picks from your core count: Low trims busy-waiting and "
       "helper threads for 4-core CPUs, Mid for 6-core CPUs, High changes nothing.",
@@ -169,12 +182,35 @@ static std::vector<Setting> g_set = {
 }
 static void register_options()
 {
+    if (const char* fn = getenv("R3_RENDERER_FORCE_NATIVE"); fn && *fn == '1')   // developer override (hidden renderer)
+        g_set[S_RENDERER].choices.push_back({ "Native Vulkan  (developer)", "vulkan" });
     // GRAPHICS QUALITY (game-side quality patches: LOD, shadows, FOV, post effects) and
     // RENDERER QUALITY (renderer switches) are added here as they land.
-    add_option(SEC_GAME_QUALITY, "fov", "Field of view  (experimental)",
-               "Widens the view: the community \"Extended FOV\" patch for Resistance 3. Lower numbers show more "
-               "of the scene. Experimental: effects and shadows near the screen edges can be slightly off.",
-               "R2_PATCH_FOV_VALUE", { {"Original", ""}, {"Wider  (0.85)", "0.85"}, {"Widest  (0.7)", "0.7"} }, 0);
+    add_option(SEC_GAME_QUALITY, "fov", "Field of view",
+               "Widens the view: more of the scene on screen at every zoom level (aiming scales with it). Applied "
+               "to the game camera itself, so shadows and culling stay aligned (R3_FOV_SAFE=0 in settings.bat "
+               "restores the old \"Extended FOV\" constant patch). The arms and weapon keep their own FOV.",
+               "R2_PATCH_FOV_VALUE", { {"Original", ""}, {"+10%", "1.1"}, {"+20%", "1.2"}, {"+30%", "1.3"},
+                                       {"+40%", "1.4"}, {"+50%", "1.5"}, {"+60%", "1.6"},
+                                       {"Wider  (old setting, 0.85)", "0.85"}, {"Widest  (old setting, 0.7)", "0.7"} }, 0);
+    add_option(SEC_GAME_QUALITY, "aspect", "Ultrawide / aspect ratio  (experimental)",
+               "The game is made for 16:9 and shows black bars on wider screens. Fit window widens the 3D view to "
+               "the window's shape (Hor+: more on the sides, nothing cut off); 21:9 and 32:9 force those shapes. "
+               "The HUD is stretched to the width (Ultrawide HUD keeps it 16:9). Compatible renderer.",
+               "R3_ULTRAWIDE", { {"16:9  (PS3 original)", ""}, {"Fit window", "auto"}, {"21:9", "21:9"}, {"32:9", "32:9"} }, 0);
+    add_option(SEC_RENDER_QUALITY, "hudfix", "Ultrawide HUD",
+               "With an ultrawide aspect ratio, keeps the HUD and menus in a centred 16:9 area instead of stretching "
+               "them. Experimental.",
+               "RSX_HUD_FIX", { {"Stretched", ""}, {"Centred 16:9  (experimental)", "1"} }, 0, {}, "rpcs3");
+    add_option(SEC_GAME_QUALITY, "lodscale", "Level of detail distance",
+               "Keeps detailed models and small objects visible further away (the game's own LOD distances x n). "
+               "Costs CPU and GPU time.",
+               "R3_LOD_SCALE", { {"Original", ""}, {"1.5x", "1.5"}, {"2x", "2"}, {"3x", "3"} }, 0);
+    add_option(SEC_GAME_QUALITY, "noloadshed", "Load shedding",
+               "On the PS3 the game lowers model detail and drops the resolution on frames it thinks were slow on "
+               "the GPU. On PC those timings are not the PS3's and it made models and textures pop in and out "
+               "with the view direction. Off (default) keeps full detail; Game restores the PS3 behaviour.",
+               "R3_NO_LOADSHED", { {"Off  (full detail)", ""}, {"Game  (PS3 behaviour)", "0"} }, 0);
     add_option(SEC_RENDER_QUALITY, "shadowscale", "Shadow resolution",
                "Renders the game's shadow maps at a higher resolution: sharper, steadier shadow edges. Costs GPU time "
                "and video memory.",
@@ -195,21 +231,35 @@ static void register_options()
     add_option(SEC_RENDER_QUALITY, "texdump", "Dump textures",
                "Writes every texture the game uploads to texdump\\ (DDS / PNG) for making a texture pack. Slow; "
                "leave off for play.",
-               "RSX_TEXDUMP", { {"Off", ""}, {"On", "1"} }, 0, {}, "rpcs3");
+               "RSX_TEXDUMP", { {"Off", ""}, {"On", "1"}, {"Menus / HUD only  (for HD UI pack)", "ui"} }, 0, {}, "rpcs3");
+    add_option(SEC_RENDER_QUALITY, "hdui", "HD UI pack",
+               "Loads the AI-upscaled menu / HUD textures from mods\\hd_ui, made on this PC from your game files by "
+               "Saves & tools > Create HD UI pack. Missing or damaged files fall back to the game's own textures. "
+               "Experimental.",
+               "RSX_HD_UI", { {"Off", ""}, {"On  (mods\\hd_ui)", "1"} }, 0, {}, "rpcs3");
     add_option(SEC_RENDER_QUALITY, "objmv", "Object motion vectors",
                "DLSS / FSR: On gives moving characters and objects their own motion. Pros: sharper moving objects, less "
                "ghosting and smearing. Cons: a small GPU cost; cloth and other dynamic meshes only get partial motion. "
                "Off uses camera motion only.",
                "RSX_DLSS_OBJMV", { {"Off", "0"}, {"On", "1"} }, 0, {}, "rpcs3");
+    add_option(SEC_RENDER_QUALITY, "dlsspreset", "DLSS preset",
+               "Which DLSS model to use (bundled SDK presets). Auto: the CNN model E on RTX 20/30 cards, NVIDIA's "
+               "choice on newer ones. NVIDIA default: K (transformer) for DLAA / Quality / Balanced, M for "
+               "Performance, L for Ultra Performance. E / F: the older CNN model, cheapest on RTX 20/30. J / K: "
+               "transformer, best image (K recommended), costly on RTX 20/30. L / M: the transformer 2 models made "
+               "for Ultra Performance / Performance. A preset the driver does not support falls back to Auto.",
+               "RSX_DLSS_PRESET", { {"Auto", ""}, {"NVIDIA default", "0"}, {"E  (CNN)", "5"}, {"F  (CNN)", "6"},
+               {"J  (transformer)", "10"}, {"K  (transformer)", "11"}, {"L  (transformer 2, Ultra Perf.)", "12"},
+               {"M  (transformer 2, Perf.)", "13"} }, 0);
     // SHADER CACHE (Performance page): VKGSRender.cpp preload_shaders. Not part of the recommendation.
     add_option(SEC_SHADERS, "precompile", "Compile shaders before playing",
-               "On: at start-up the game compiles every shader it has already used on this PC before play begins "
-               "(a \"Compiling shaders N / M\" panel shows the progress), so shaders seen before never stutter. Usually a "
-               "second or two; longer after a driver update or Rebuild shader cache. Off: only the first few hundred "
-               "before play, the rest in the background while you play. Pros of On: no stutter from shaders already "
-               "seen or found by the shader scan. Cons: longer start-up (seconds normally, about a minute after a driver "
-               "update or Rebuild shader cache).",
-               "R2_PRELOAD_BOOT", { {"On", "-1"}, {"Off", ""} }, 0, {}, "rpcs3");
+               "On: at start-up the game builds every shader pipeline it has already used on this PC before play begins "
+               "(a \"Compiling shaders N / M\" panel shows the progress), so effects seen before never stutter. Usually a few "
+               "seconds; about a minute after a driver update or Rebuild shader cache. Off: nothing is built at start-up or in "
+               "the background; each pipeline is built when the game first needs it (can hitch briefly; the safest choice if "
+               "your GPU driver crashes while compiling shaders). Pros of On: no stutter from shaders already seen. "
+               "Cons: longer start-up.",
+               "PORT_SHADER_PRELOAD", { {"On", "1"}, {"Off", "0"} }, 0, {}, "rpcs3");
     add_option(SEC_SHADERS, "shaderthreads", "Shader compile threads",
                "How many processor threads compile shaders while the game starts (Compile shaders before playing). "
                "Auto uses all of them but one.",
@@ -222,6 +272,13 @@ static void register_options()
                "for the frames until its shader is compiled. Pros of On: nothing pops in. Cons: slower frames while it is "
                "active and possible DLSS ghosting on those objects. Rarely needed with Compile shaders before playing on.",
                "R2_SHADER_INTERP", { {"Off", ""}, {"On", "1"} }, 0, {}, "rpcs3");
+    // r2rsx_bridge.cpp: g_cfg.video.texture_lod_bias, added to every texture's own bias (on top of the upscaler's)
+    add_option(SEC_RENDER_QUALITY, "lodbias", "Texture detail (LOD bias)",
+               "Shifts which texture mip level is used everywhere, on top of the automatic sharpening the upscaler "
+               "already applies. Negative = sharper distant textures. Pros: crisper floors and walls far away. Cons: "
+               "too negative shimmers and aliases in motion; positive is blurrier but calmer.",
+               "R2_LOD_BIAS", { {"As the game", ""}, {"-0.5  (sharper)", "-0.5"}, {"-1  (sharpest)", "-1"},
+                                {"+0.5  (softer)", "0.5"} }, 0, {}, "rpcs3");
 }
 
 // PC-port behaviour (Display / Audio / Interface / Advanced pages, see launcher_cats.inc). Kept apart from register_options() (graphics).
@@ -239,6 +296,29 @@ static BOOL CALLBACK pc_mon_enum(HMONITOR m, HDC, LPRECT, LPARAM lp)
     out->push_back({ _strdup(label), _strdup(num) });
     return TRUE;
 }
+// Channels of the default playback device's shared-mode mix format (0 = unknown), so the speaker layout
+// default follows the real output: Stereo on headphones / stereo speakers instead of always 5.1 (R2 #12).
+static int default_speaker_channels()
+{
+    const HRESULT ci = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    int ch = 0;
+    IMMDeviceEnumerator* en = NULL;
+    if (SUCCEEDED(CoCreateInstance(__uuidof(MMDeviceEnumerator), NULL, CLSCTX_ALL, __uuidof(IMMDeviceEnumerator), (void**)&en)) && en) {
+        IMMDevice* dev = NULL;
+        if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, &dev)) && dev) {
+            IAudioClient* ac = NULL;
+            if (SUCCEEDED(dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, NULL, (void**)&ac)) && ac) {
+                WAVEFORMATEX* wf = NULL;
+                if (SUCCEEDED(ac->GetMixFormat(&wf)) && wf) { ch = wf->nChannels; CoTaskMemFree(wf); }
+                ac->Release();
+            }
+            dev->Release();
+        }
+        en->Release();
+    }
+    if (SUCCEEDED(ci)) CoUninitialize();
+    return ch;
+}
 static void register_pc_options()
 {
     std::vector<Choice> mons = { {"Primary monitor", ""} };
@@ -246,22 +326,39 @@ static void register_pc_options()
     add_option(SEC_PC, "monitor", "Monitor",
                "Which screen the game opens on (borderless fullscreen and windowed). Numbered in Windows' order.",
                "RSX_MONITOR", std::move(mons), 0);
+    add_option(SEC_PC, "winremember", "Remember window position",
+               "Windowed mode: the game opens where you last left its window (and at the size you dragged it to). "
+               "Forgotten when you change the window size or monitor, or when that spot is no longer on a screen.",
+               "RSX_WINDOW_REMEMBER", { {"On", ""}, {"Off  (always centred)", "0"} }, 0);
     add_option(SEC_PC, "background", "When the game is in the background",
                "What happens when you Alt+Tab away or click another window. Pause freezes the game and mutes it; "
                "Mute keeps it running silently; Keep running changes nothing.",
                "R2_BACKGROUND", { {"Pause and mute", ""}, {"Mute only", "mute"}, {"Keep running", "run"} }, 0);
     // stubs.cpp port_speakers / cellAudio.c audio_buffer_ms (switches that had no launcher option before)
+    // default (= the recommended choice) follows the default playback device: stereo -> Stereo, 8+ ch -> 7.1
+    const int spk_ch = default_speaker_channels();
     add_option(SEC_PC, "speakers", "Speaker layout",
                "The channel layout the game mixes for. Windows down-mixes to your real speakers or headphones. "
+               "The recommended choice follows your default playback device. "
                "Pros of 5.1 / 7.1: proper surround on a surround system. Cons: on plain stereo Stereo can sound a little "
                "fuller, since nothing is down-mixed.",
-               "PORT_SPEAKERS", { {"5.1 surround", ""}, {"7.1 surround", "8"}, {"Stereo", "2"} }, 0);
+               "PORT_SPEAKERS", { {"5.1 surround", ""}, {"7.1 surround", "8"}, {"Stereo", "2"} },
+               (spk_ch > 0 && spk_ch <= 2) ? 2 : spk_ch >= 8 ? 1 : 0);
     add_option(SEC_PC, "audio_buffer", "Audio buffer",
                "How much sound is buffered ahead. Auto is 100 ms (150 ms on CPUs with fewer than 12 threads). "
                "Pros of a larger buffer: no crackles or stretching when the CPU is busy. Cons: sound lags the picture a "
                "little more. Smaller: tighter sound, but may crackle on a busy CPU.",
                "PORT_AUDIO_BUFFER_MS", { {"Auto", ""}, {"80 ms", "80"}, {"100 ms", "100"}, {"150 ms", "150"},
                                          {"200 ms", "200"} }, 0);
+    // cellAudio.c audio_mix_one_block (ps3emu/port_pc_extras.h pcx_audio_apply); also F9 > More PC Options
+    add_option(SEC_PC, "volume", "Master volume",
+               "All game sound, on top of the game's own volume options (also in game: F9 and Options).",
+               "PORT_VOLUME", { {"100%", ""}, {"90%", "90"}, {"80%", "80"}, {"70%", "70"}, {"60%", "60"}, {"50%", "50"},
+                                {"40%", "40"}, {"30%", "30"}, {"20%", "20"}, {"10%", "10"}, {"Muted", "0"} }, 0);
+    add_option(SEC_PC, "audio_mono", "Mono audio",
+               "Accessibility: mixes every channel to both ears, so nothing is lost when you hear with one ear or "
+               "use a single speaker.",
+               "PORT_AUDIO_MONO", { {"Off", ""}, {"On", "1"} }, 0);
     add_option(SEC_PC, "skipintro", "Skip intro movies",
                "Skips the studio logo video and the opening movie at start-up "
                "(the game goes straight to the title screen).",
@@ -275,7 +372,8 @@ static void register_pc_options()
                "symbols for a DualShock / DualSense, Xbox buttons (A B X Y, LB RB...) for Xbox and others, Switch by its layout). "
                "With keyboard and mouse the prompts always show your keys. Keyboard keys shows your keys even "
                "with a controller.",
-               "R2_PAD_GLYPHS", { {"Auto", ""}, {"Xbox", "xbox"}, {"PlayStation", "ps"}, {"Keyboard keys", "keys"} }, 0);
+               "R2_PAD_GLYPHS", { {"Auto", ""}, {"Xbox", "xbox"}, {"PlayStation", "ps"}, {"Nintendo  (Switch)", "nintendo"},
+                                 {"Keyboard keys", "keys"} }, 0);
     add_option(SEC_PC, "present", "Presentation mode",
                "How finished frames reach the screen. Default follows VSync. Immediate (VRR) never waits - best with "
                "G-Sync / FreeSync and an uncapped or Just under refresh frame rate. Mailbox shows the newest frame "
@@ -292,15 +390,31 @@ static void register_pc_options()
                "Frame rate, frame time and GPU draw statistics in a corner of the game window. F3 shows or hides it "
                "in game. Not visible in exclusive fullscreen.",
                "R2_OVERLAY", { {"Off  (F3 shows it)", ""}, {"On at start", "1"}, {"Disabled  (F3 does nothing)", "0"} }, 0);
+    add_option(SEC_PC, "ovgraph", "Frame-time graph",
+               "A graph of the last 120 frame times under the performance overlay (F3): green is smooth, yellow and red "
+               "bars are slow frames (stutter).",
+               "PORT_OVERLAY_GRAPH", { {"On", ""}, {"Off", "0"} }, 0);
+    // port_osd.h posd_ui_scale: the PC menus (F9 / F10 / hold Esc), the overlay and notifications
+    add_option(SEC_PC, "uiscale", "UI scale",
+               "Size of the PC menus, the performance overlay and the notifications. Auto makes the overlay and "
+               "notifications larger on 1440p and 4K screens (the menus already follow the window size).",
+               "PORT_UI_SCALE", { {"Auto", ""}, {"75%", "75"}, {"100%", "100"}, {"125%", "125"}, {"150%", "150"},
+                                  {"175%", "175"}, {"200%", "200"} }, 0);
     add_option(SEC_PC, "trophytoast", "Trophy notifications",
                "A small notification in the corner of the game window when you earn a trophy. Trophies are always "
                "recorded (see the Trophies page).",
                "R2_TROPHY_TOAST", { {"On", ""}, {"Off", "0"} }, 0);
+    add_option(SEC_PC, "trophystyle", "Trophy pop-up style",
+               "PS3: a PS3-style pop-up at the top corner (\"You have earned a trophy.\", the trophy's own icon "
+               "from the game files and its name) that slides in for about 6 seconds. Classic: the port's older "
+               "notification with the grade badge and the trophy's description.",
+               "PORT_TROPHY_STYLE", { {"PS3", ""}, {"Classic", "old"} }, 0);
     // r3_pcextra.cpp: the "Hold Space / A to skip" hint when a movie starts (skipping itself is "cutscene_skip")
     add_option(SEC_PC, "skiphint", "Show cutscene skip hint",
-               "A short \"Hold Space / A to skip\" notification in the corner when a movie starts. Off hides it; "
-               "holding the button still skips (Hold to skip movies).",
-               "PORT_SKIP_HINT", { {"On", ""}, {"Off", "0"} }, 0);
+               "A short \"Hold Space / A to skip\" notification in the corner when a movie                starts. Auto (default): "
+                              "shown when Skip unwatched movies is on, since every story movie can then be skipped. "
+                              "Holding the button skips either way (Hold to skip movies).",
+                              "PORT_SKIP_HINT", { {"Auto", ""}, {"On", "1"}, {"Off", "0"} }, 0);
     add_option(SEC_PC, "mods", "Mods folder",
                "Loads replacement game files from the mods folder next to the game: mods\\<mod name>\\USRDIR\\... "
                "replaces the same file under the game's PS3_GAME folder. A folder named like a .psarc archive replaces "
@@ -308,6 +422,20 @@ static void register_pc_options()
                "Cons: the first start of a modded level takes a moment to build the patched archive (kept in "
                "mods\\.cache). The replaced files are listed in logs\\run.log.",
                "R2_MODS", { {"Off", ""}, {"On", "1"} }, 0);
+    // cellAvconfExt.c / r2rsx_bridge.cpp: the PS3 video-out gamma (out = in^g)
+    add_option(SEC_PC, "gamma", "Brightness",
+               "Display gamma applied to the final picture (HUD included), on top of the game's own brightness "
+               "option. Brighter lifts dark areas; Darker deepens them.",
+               "PS3_DISPLAY_GAMMA", { {"Game default", ""}, {"Brighter", "0.9"}, {"Brightest", "0.8"},
+                                      {"Darker", "1.1"}, {"Darkest", "1.2"} }, 0);
+    // cellSysutil.c sysutil_language: the PS3 system language the game reads
+    add_option(SEC_PC, "language", "Game language",
+               "The console language the game is told. Auto follows Windows. A language your disc does not contain "
+               "falls back to the game's default (the US disc carries a few languages only).",
+               "PS3_LANG", { {"Auto  (Windows language)", ""}, {"English", "en"}, {"English (UK)", "en-gb"},
+                             {"French", "fr"}, {"Spanish", "es"}, {"German", "de"}, {"Italian", "it"},
+                             {"Portuguese (Brazil)", "pt-br"}, {"Portuguese", "pt"}, {"Dutch", "nl"},
+                             {"Russian", "ru"}, {"Polish", "pl"} }, 0);
 }
 // Controls page
 static void register_input_options()
@@ -333,6 +461,41 @@ static void register_input_options()
                "How stick travel maps to speed. Linear is direct; Precise is slow near the centre for fine aim; "
                "Fast reaches full speed sooner.",
                "PAD_CURVE", { {"Default", ""}, {"Linear", "1"}, {"Precise", "1.6"}, {"Very precise", "2.2"}, {"Fast", "0.7"} }, 0);
+    // ps3emu/port_pc_extras.h (cellPad.c): stick / trigger extras, turn boost, hold / toggle, rumble, focus
+    add_option(SEC_INPUT, "outerdz", "Stick outer deadzone",
+               "How much of the stick's edge already counts as full deflection. Helps worn sticks that no longer "
+               "reach the edge (slow maximum turn speed).",
+               "PAD_OUTER_DEADZONE", { {"Off", ""}, {"5%", "5"}, {"10%", "10"}, {"15%", "15"} }, 0);
+    add_option(SEC_INPUT, "antidz", "Stick anti-deadzone",
+               "Makes the smallest stick movement already move, skipping the game's own deadzone. Pros: finer aim "
+               "near the centre. Cons: too much makes the view creep with stick drift.",
+               "PAD_ANTI_DEADZONE", { {"Off", ""}, {"10%", "10"}, {"20%", "20"}, {"30%", "30"} }, 0);
+    add_option(SEC_INPUT, "trigdz", "Trigger deadzone",
+               "How far a trigger must be pulled before it counts (a light touch on L2 / R2 does nothing).",
+               "PAD_TRIGGER_DEADZONE", { {"Off", ""}, {"10%", "10"}, {"20%", "20"}, {"30%", "30"} }, 0);
+    add_option(SEC_INPUT, "turnboost", "Turn boost",
+               "Holding the right stick at its edge ramps in extra turning speed (degrees per second) after a "
+               "moment, for quick 180s. Not while aiming down the sights.",
+               "PAD_TURN_BOOST", { {"Off", ""}, {"90 deg/s", "90"}, {"180 deg/s", "180"}, {"270 deg/s", "270"} }, 0);
+    add_option(SEC_INPUT, "crouchmode", "Crouch button  (experimental)",
+               "Controller crouch (Circle / B). As the game: unchanged. Toggle: press to crouch, press again to stand. "
+               "Hold: crouch only while the button is held.",
+               "PAD_CROUCH_MODE", { {"As the game", ""}, {"Toggle", "toggle"}, {"Hold", "hold"} }, 0);
+    add_option(SEC_INPUT, "sprintmode", "Sprint button  (experimental)",
+               "Controller sprint (L3). As the game: unchanged. Toggle: press to sprint, press again to stop. "
+               "Hold: sprint only while the stick is held in.",
+               "PAD_SPRINT_MODE", { {"As the game", ""}, {"Toggle", "toggle"}, {"Hold", "hold"} }, 0);
+    add_option(SEC_INPUT, "rumble", "Vibration",
+               "Controller rumble strength (also in game: F9 and Options).",
+               "PAD_RUMBLE", { {"100%", ""}, {"75%", "75"}, {"50%", "50"}, {"25%", "25"}, {"Off", "0"} }, 0);
+    add_option(SEC_INPUT, "enterbtn", "Confirm button",
+               "Which button accepts in the game's menus. Cross: Western PS3 layout. Circle: Japanese PS3 layout "
+               "(Cross then goes back).",
+               "PS3_ENTER_BUTTON", { {"Cross", ""}, {"Circle", "circle"} }, 0);
+    add_option(SEC_INPUT, "padbg", "Controller in the background",
+               "Whether a controller still controls the game while another window has the focus. Auto: only when "
+               "\"When the game is in the background\" is Keep running or Mute only.",
+               "PAD_BACKGROUND_INPUT", { {"Auto", ""}, {"On", "1"}, {"Off", "0"} }, 0);
     // SDL3 controllers, gyro aiming, light bar (ps3recomp/libs/input/cellPad.c, pad_sdl3.c)
     add_option(SEC_INPUT, "padbackend", "Controller support",
                "SDL3 reads DualShock 4, DualSense, Switch Pro / Joy-Con and Xbox controllers directly: correct "
@@ -386,6 +549,11 @@ static void register_input_options()
                "Local co-op with one controller: player 1 plays on the controller, player 2 on the keyboard and "
                "mouse (the mouse moves player 2's view like a right stick).",
                "PAD_P2_KEYBOARD", { {"Off", ""}, {"On", "1"} }, 0);
+    // Online (ps3recomp/libs/network/port_online.c): RPCN sign-in and DNS override from online.ini
+    add_option(SEC_INPUT, "online", "Online  (experimental)",
+               "Signs in to an RPCN server with the account in online.ini (copy online.ini.example) and sends the "
+               "game's server lookups to its dns= server. Unfinished: see the README, \"Online\". Off never touches the network.",
+               "PORT_ONLINE", { {"Off", ""}, {"On", "1"} }, 0);
 }
 
 static char g_dir[MAX_PATH];
@@ -423,10 +591,12 @@ static void pick(int s, const char* v)
 // Recommended defaults from the hardware (project/r2_autoconfig.h, shared with the game's R2_PRESET):
 // the GPU the renderer will use (discrete before integrated), the CPU's cores and threads, and the
 // primary screen's resolution and refresh rate. Sets each Setting's def.
+static bool g_force_deck = false;      // the "Preset: Steam Deck" button: recommend as for a Deck
 static void detect_hardware(const char* sim = nullptr)
 {
     g_hwi = r2ac::Hardware();
     r2ac::detect(g_hwi);
+    if (g_force_deck) { g_hwi.deck = true; g_hwi.integrated = true; }
     if (sim && strstr(sim, "--sim-")) { apply_sim(g_hwi, sim); r2ac::classify(g_hwi); }
     g_rec = r2ac::recommend(g_hwi);
     pick(S_DISPLAY, "borderless");
@@ -457,19 +627,34 @@ static void load_settings()
     for (auto& s : g_set) s.sel = s.def;
     FILE* f = fopen(path_of("settings.ini").c_str(), "r");
     if (!f) return;
+    std::vector<std::string> lines;
     char line[256];
-    while (fgets(line, sizeof line, f)) {
+    while (fgets(line, sizeof line, f)) { line[strcspn(line, "\r\n")] = 0; lines.push_back(line); }
+    fclose(f);
+    // renamed keys (port_ini_migrate.h): copied to the new name and written back; the old line stays as a fallback
+    if (port_ini_migrate_lines(lines) > 0)
+        if (FILE* w = fopen(path_of("settings.ini").c_str(), "w")) {
+            for (auto& l : lines) fprintf(w, "%s\n", l.c_str());
+            fclose(w);
+        }
+    for (auto& l : lines) {
+        snprintf(line, sizeof line, "%s", l.c_str());
         char* eq = strchr(line, '=');
         if (!eq) continue;
         *eq = 0;
         char* v = eq + 1;
-        v[strcspn(v, "\r\n")] = 0;
+        if (!strcmp(line, "precompile")) {   // old values: R2_PRELOAD_BOOT -1 / RSX_PSO_PRECOMPILE 1 = On, empty = Off
+            v = (char*)(*v && strcmp(v, "0") ? "1" : "0");
+        }
+        if (!strcmp(line, "fx_dof") && !strcmp(v, "aim")) {   // old "Depth of field: Off while aiming" = DOF on + ADS blur off
+            strcpy(line, "fx_ads_blur");
+            v = (char*)"0";
+        }
         for (auto& s : g_set)
             if (!strcmp(s.key, line))
                 for (size_t i = 0; i < s.choices.size(); i++)
                     if (!strcmp(s.choices[i].value, v)) s.sel = (int)i;
     }
-    fclose(f);
 }
 static const char* val(int i) { return g_set[i].choices[g_set[i].sel].value; }
 
@@ -496,12 +681,19 @@ static bool save_settings()
 #include "port_report.cpp"                  // "Report a problem" zip + "the game crashed last time" prompt
 
 // RSX_RES_SCALE: "auto" = the largest step not above the output (fullscreen: the screen, Windowed: the window),
-// so DLSS/FSR never upscale beyond what is shown and get scaled back down
+// so DLSS/FSR never upscale beyond what is shown and get scaled back down.
+// detect_hardware() runs before every mode (--play included), so the screen height is known; 1080 is only the
+// fallback when detection fails. In Windowed mode auto follows the window size (S_WINDOW), so a 1920x1080 or
+// 1280x720 window caps the resolution at that height on any monitor -- that is the "1080p/720p under --play"
+// report. R3_RES_AUTO_MONITOR=1 (opt-in): Windowed also uses the screen instead of the window (for a window
+// that is maximised later).
 static const char* res_value()
 {
     if (strcmp(val(S_RES), "auto")) return val(S_RES);
-    int oh = g_hwi.screen_h > 0 ? g_hwi.screen_h : 1080;
-    if (!strcmp(val(S_DISPLAY), "windowed"))
+    const int sh = g_hwi.screen_h;
+    int oh = sh > 0 ? sh : 1080;
+    const char* wm = getenv("R3_RES_AUTO_MONITOR");
+    if (!strcmp(val(S_DISPLAY), "windowed") && !(wm && *wm == '1'))
         if (const char* x = strchr(val(S_WINDOW), 'x')) oh = atoi(x + 1);
     return r2ac::res_for_height(oh);
 }
@@ -521,8 +713,10 @@ static void write_env(FILE* f)
     fprintf(f, "set \"RSX_SHARPEN=%s\"\n", val(S_SHARPEN));
     // AMD FSR 3.1 is RSX_FSR=1 on the RPCS3 renderer and RSX_FSR=3 on the native Vulkan one (1 = FSR1 there).
     // XeSS (4) only exists on the RPCS3 renderer; on the native one it falls back to FSR 3.1 as well.
-    const bool fsr3_native = !strcmp(val(S_RENDERER), "vulkan") &&
-                             (!strcmp(val(S_FSR), "1") || !strcmp(val(S_FSR), "4"));
+    // Direct3D 12 (experimental) has all three: 3 = FSR 3.1, 4 = XeSS, 2 = DLSS (1 would be FSR1 there).
+    const bool fsr3_native = (!strcmp(val(S_RENDERER), "vulkan") &&
+                              (!strcmp(val(S_FSR), "1") || !strcmp(val(S_FSR), "4"))) ||
+                             (!strcmp(val(S_RENDERER), "d3d12") && !strcmp(val(S_FSR), "1"));
     fprintf(f, "set \"RSX_FSR=%s\"\n", fsr3_native ? "3" : val(S_FSR));
     fprintf(f, "set \"RSX_UPSCALE=%s\"\n", g_set[S_FSR].sel ? val(S_UPSCALE) : "1");
     fprintf(f, "set \"R2_SHADER_MODE=%s\"\n", val(S_SHADER));
@@ -870,7 +1064,7 @@ static int g_drag = 0;                   // slider being dragged
 // toggles
 enum { TG_INVERT = 1 };
 // buttons
-enum { BT_RESET_CTL = 1, BT_RESET_GFX, BT_FOLDER, BT_LOGS, BT_WEB, BT_CONTROLS_TXT, BT_SAVES, BT_SHOTS, BT_RESET_ALL, BT_REBUILD_SHADERS, BT_REPORT };
+enum { BT_RESET_CTL = 1, BT_RESET_GFX, BT_FOLDER, BT_LOGS, BT_WEB, BT_CONTROLS_TXT, BT_SAVES, BT_SHOTS, BT_RESET_ALL, BT_REBUILD_SHADERS, BT_REPORT, BT_DECK };
 // key capture
 static int g_cap_a = -1, g_cap_k = -1;   // action/slot being captured (-2 = mouse release key)
 static std::wstring g_toast; static DWORD g_toast_until = 0;
@@ -890,7 +1084,15 @@ static struct {
     int exit_code = 0;
     DWORD t0 = 0;
     RectF skip_btn;
+    int kind = 0;                         // SCAN_SHADERS / SCAN_HDUI / SCAN_HDUI_REMOVE (no Cancel)
+    std::string summary;                  // guarded; HD UI: the helper's "@summary" line
+    unsigned eta = 0;                     // guarded; HD UI: seconds left ("@eta"), 0 = not known yet
 } g_scan;
+enum { SCAN_SHADERS, SCAN_HDUI, SCAN_HDUI_REMOVE };
+static bool shc_game_running();
+static void hdui_start();
+static void hdui_remove();
+static bool hdui_have_pack();
 
 static int dd_count(int kind, int idx)
 {
@@ -935,13 +1137,27 @@ enum { D_H1, D_INTRO, D_H2, D_LABEL, D_LABEL_DIM, D_GROUP, D_NOTE, D_ABOUT_TITLE
 
 static void deco(int kind, RectF r, const std::string& s) { g_deco.push_back({ kind, r, s }); }
 
+// only_renderer may list several renderers: "rpcs3|d3d12"
+static bool renderer_in(const char* list, const char* r)
+{
+    const size_t n = strlen(r);
+    for (const char* p = list; *p;) {
+        const char* e = strchr(p, '|');
+        const size_t k = e ? (size_t)(e - p) : strlen(p);
+        if (k == n && !strncmp(p, r, n)) return true;
+        if (!e) break;
+        p = e + 1;
+    }
+    return false;
+}
+
 static void layout_setting_row(float x, float& y, float w, int si)
 {
     Setting& s = g_set[si];
     const bool dis = (si == S_WINDOW && strcmp(val(S_DISPLAY), "windowed") != 0) ||
                      (si == S_UPSCALE && g_set[S_FSR].sel == 0) ||
                      (si == S_SHADER && strcmp(val(S_RENDERER), "rpcs3") != 0) ||
-                     (s.only_renderer && strcmp(val(S_RENDERER), s.only_renderer) != 0);
+                     (s.only_renderer && !renderer_in(s.only_renderer, val(S_RENDERER)));
     Widget& row = add(W_ROW, RectF(x - SF(12), y, w + SF(24), SF(ROWH)), si);
     row.title = s.title; row.help = s.help; row.disabled = dis;
     deco(dis ? D_LABEL_DIM : D_LABEL, RectF(x, y, w - SF(CTLW) - SF(16), SF(ROWH)), s.title);
@@ -971,7 +1187,11 @@ static void layout_recommend_panel(float x, float& y, float w)
     b.title = "Auto-detect (recommended)";
     b.help = "Detects your graphics card, processor and screen again and resets the settings on every page to the "
              "ones recommended for them (also the first-run defaults). Key bindings and the mouse settings are not changed.";
-    deco(D_LABEL_DIM, RectF(x + SF(266), y, w - SF(266), SF(36)),
+    Widget& bd = add(W_BUTTON, RectF(x + SF(262), y, SF(190), SF(36)), BT_DECK);
+    bd.title = "Preset: Steam Deck";
+    bd.help = "Handheld / battery settings: PS3 resolution with FSR 1 to 1280 x 800, low quality tier, 40 fps (set the Deck's "
+              "screen to 40 Hz), 30 fps in menus, UI scale 150% and Xbox button prompts. Picked automatically on a Steam Deck.";
+    deco(D_LABEL_DIM, RectF(x + SF(468), y, w - SF(468), SF(36)),
          differs_from_recommended() ? "Your settings differ from the recommendation." : "Using the recommended settings.");
     y = top + SF(150) + SF(22);
 }
@@ -984,6 +1204,8 @@ static void layout_recommend_panel(float x, float& y, float w)
 static void play();
 #define LX_ENV(x) "R3_" x
 #define LX_TAG "R3"
+#define LX_USER_DIR "Resistance 3"            // Saved Games\<this> (Save location)
+#define LX_TITLE_IDS "BCUS98176", "BCES01118", "BCJS37010", "BCAS20215", "BCKS10229"   // this build first (RPCS3 import)
 #define LX_HAS_FX 0                         // R2's toggles (screen blur, shake, letterbox) do not exist in Resistance 3
 #define LX_HAS_PFX 1                        // Resistance 3: film grain / depth of field / motion blur (r3_pcextra.cpp)
 #include "launcher_extra.inc"               // PC extras options, Saves & tools page, benchmark
@@ -991,6 +1213,8 @@ static void play();
 
 static void layout()
 {
+    lx_sync_root();                         // launcher_extra.inc: PS3_GAMEDATA_ROOT follows Save location
+    { static bool once = false; if (!once) { once = true; lx_import_recover(); } }   // finish an RPCS3 import a crash cut short
     g_w.clear(); g_deco.clear();
     RECT cr; GetClientRect(g_hw, &cr);
     const float cw = (float)cr.right, ch = (float)cr.bottom;
@@ -1492,10 +1716,28 @@ static void paint(HDC hdc)
             RectF pr((cw - pw) / 2, (ch - ph) / 2, pw, ph);
             fill_rr(g, pr, SF(10), C_PANEL); stroke_rr(g, pr, SF(10), C_BORDER, SF(1));
             const float ix = pr.X + SF(24), iw = pr.Width - SF(48);
-            text(g, L"Preparing shaders from your game files", f_h2, C_TEXT, RectF(ix, pr.Y + SF(18), iw, SF(28)));
+            const bool hd = g_scan.kind == SCAN_HDUI, rm = g_scan.kind == SCAN_HDUI_REMOVE;
+            text(g, rm ? L"Removing the HD UI pack" : hd ? L"Creating the HD UI pack" : L"Preparing shaders from your game files",
+                 f_h2, C_TEXT, RectF(ix, pr.Y + SF(18), iw, SF(28)));
             std::string sub = !ran ? std::string("Checking the shader cache...")
                             : t ? phase + "  " + std::to_string(std::min(d, t)) + " / " + std::to_string(t)
                                 : (phase.empty() ? std::string("scan") : phase) + "...";
+            if (hd) {
+                unsigned eta;
+                AcquireSRWLockShared(&g_scan_lock); eta = g_scan.eta; ReleaseSRWLockShared(&g_scan_lock);
+                sub = phase == "upscale" && t ? "Upscaling  " + std::to_string(std::min(d, t)) + " / " + std::to_string(t)
+                    : phase == "download" ? std::string("Downloading the AI model (first time only)...")
+                    : phase == "gpu" ? std::string("Checking the graphics card...")
+                    : phase == "check" ? std::string("Testing the AI upscaler...")
+                    : std::string("Reading the menu / HUD textures from your game files...");
+                if (phase == "upscale" && eta && d < t) {
+                    char b[64];
+                    if (eta >= 3600) snprintf(b, sizeof b, "   about %u h %02u min left", eta / 3600, eta / 60 % 60);
+                    else snprintf(b, sizeof b, "   about %u min left", std::max(1u, (eta + 59) / 60));
+                    sub += b;
+                }
+            }
+            if (rm) sub = "Removing...";
             text(g, W(sub), f_body, C_DIM, RectF(ix, pr.Y + SF(52), iw, SF(22)));
             RectF br(ix, pr.Y + SF(84), iw, SF(8));
             fill_rr(g, br, SF(4), C_CTL);
@@ -1505,12 +1747,19 @@ static void paint(HDC hdc)
                 const float l = std::max(br.X, br.X + pos), r = std::min(br.X + br.Width, br.X + pos + seg);
                 if (r > l) fill_rr(g, RectF(l, br.Y, r - l, br.Height), SF(4), C_ACCENT);
             }
-            text(g, L"Once per install and after Rebuild shader cache: the shaders in your game files are added to the "
-                    L"shader cache, so Compile shaders before playing covers the whole game. The game starts when done.",
+            text(g, rm ? L"mods\\hd_ui is deleted; the game goes back to its own menu / HUD textures. "
+                         L"This cannot be cancelled and takes a moment with a large pack."
+                  : hd ? L"The menu and HUD textures are upscaled 2-4x by an AI model on the graphics card (the CPU if that fails) into mods\\hd_ui. "
+                         L"Cancel keeps what is done; Create HD UI pack again continues from there."
+                       : L"Once per install and after Rebuild shader cache: the shaders in your game files are added to the "
+                         L"shader cache, so Compile shaders before playing covers the whole game. The game starts when done.",
                  f_small, C_FAINT, RectF(ix, pr.Y + SF(102), iw, SF(40)), AL_L, false, true);
-            g_scan.skip_btn = RectF(pr.X + pr.Width - SF(24) - SF(150), pr.Y + ph - SF(50), SF(150), SF(34));
-            fill_rr(g, g_scan.skip_btn, SF(7), C_CTL); stroke_rr(g, g_scan.skip_btn, SF(7), C_BORDER, SF(1));
-            text(g, L"Skip for now", f_btn, C_TEXT, g_scan.skip_btn, AL_C);
+            if (rm) g_scan.skip_btn = RectF();
+            else {
+                g_scan.skip_btn = RectF(pr.X + pr.Width - SF(24) - SF(150), pr.Y + ph - SF(50), SF(150), SF(34));
+                fill_rr(g, g_scan.skip_btn, SF(7), C_CTL); stroke_rr(g, g_scan.skip_btn, SF(7), C_BORDER, SF(1));
+                text(g, hd ? L"Cancel" : L"Skip for now", f_btn, C_TEXT, g_scan.skip_btn, AL_C);
+            }
         } else g_scan.skip_btn = RectF();
     }
 
@@ -1580,9 +1829,34 @@ static void capture_done(const char* key)
 
 static const char* g_cmd = nullptr;     // command line (the --sim-* test hooks apply to re-detection too)
 
+// Steam Deck (r2ac::detect_platform: SteamDeck=1, the APU name or the Jupiter / Galileo board): the 40 fps and 1280 x 800
+// choices, larger PC menus / overlay for the 7-inch screen and Xbox button prompts (Steam Input's controller).
+// The preset also picks 40 fps (the Deck's 40 Hz mode) and 30 fps menus to save battery.
+static void deck_defaults(bool preset)
+{
+    if (!g_hwi.deck) return;
+    dist_add_choice("fps", "30", "40  (Steam Deck at 40 Hz)", "40");
+    dist_add_choice("window", "1280x720", "1280 x 800  (Steam Deck)", "1280x800");
+    pick(S_WINDOW, "1280x800");
+    auto pick_key = [](const char* key, const char* v) { if (Setting* s = dist_setting(key)) pick((int)(s - g_set.data()), v); };
+    pick_key("uiscale", "150");
+    pick_key("padglyphs", "xbox");
+    if (preset) { pick(S_FPS, "40"); pick_key("menufps", "30"); }
+}
+static void deck_preset()
+{
+    g_force_deck = true;
+    detect_hardware(g_cmd);
+    g_force_deck = false;
+    deck_defaults(true);
+    for (auto& s : g_set) s.sel = s.def;
+    save_settings();
+    toast("Steam Deck preset: " + g_rec_desc + ", 40 fps, 1280 x 800, UI 150%");
+}
 static void restore_graphics()
 {
     detect_hardware(g_cmd);
+    deck_defaults(false);
     for (auto& s : g_set) s.sel = s.def;
     save_settings();
     toast("Recommended for your PC: " + g_rec_desc);
@@ -1605,10 +1879,49 @@ static bool cpu_is_x86_64_v3()
     return ((unsigned)r[2] >> 5 & 1) != 0;
 }
 
+// RSX_CLAIM_FOREGROUND=0 in the environment also stops the launcher granting the foreground (settings.bat is
+// rewritten by save_settings() before each launch and never carries it, so only the environment counts). The game is a grandchild (launcher -> run.bat's cmd -> game), so its PID is not
+// known here and the grant has to be ASFW_ANY; it lasts only until the next input or foreground change.
+static void allow_game_foreground()
+{
+    char v[8] = "";
+    if (GetEnvironmentVariableA("RSX_CLAIM_FOREGROUND", v, sizeof v) && v[0] == '0') return;
+    AllowSetForegroundWindow(ASFW_ANY);
+}
+
+// The checks run.bat makes before it starts the game: "" when it can start, else what is missing. run.bat always
+// needs build\Resistance3.exe, then runs PORT_GAME_EXE (environment; relative to the port folder) or, on a CPU
+// without AVX2, build_baseline\Resistance3.exe when that exists.
+static std::string game_files_missing()
+{
+    auto exists = [](const std::string& p) { return GetFileAttributesA(p.c_str()) != INVALID_FILE_ATTRIBUTES; };
+    if (!exists(path_of("build\\Resistance3.exe")))
+        return "The game is not built yet (build\\Resistance3.exe is missing). Run Setup.bat first.";
+    char exe[MAX_PATH] = "";
+    const DWORD n = GetEnvironmentVariableA("PORT_GAME_EXE", exe, sizeof exe);
+    if (n > 0 && n < sizeof exe) {
+        const bool abs = (exe[0] && exe[1] == ':') || (exe[0] == '\\' && exe[1] == '\\');
+        if (!exists(abs ? std::string(exe) : path_of(exe)))
+            return std::string("PORT_GAME_EXE is set to ") + exe + ", which does not exist. Build it or clear PORT_GAME_EXE.";
+    }
+    if (!exists(path_of("game\\EBOOT.elf")))
+        return "The game program game\\EBOOT.elf is missing. Run Setup.bat again to decrypt it from your copy.";
+    return "";
+}
+
 static void play_launch()
 {
     lx_auto_backup();                       // launcher_extra.inc
     SetEnvironmentVariableA("PORT_CPU_V3", cpu_is_x86_64_v3() ? "1" : "0");   // read by run.bat
+    // The game window appears after this window is gone; let it take the foreground
+    // (RSX_CLAIM_FOREGROUND in rsx_null_backend.c does the rest). Harmless if refused.
+    allow_game_foreground();
+    // run.bat runs hidden, so its own missing-file messages (and their pause) would never be seen
+    const std::string missing = game_files_missing();
+    if (!missing.empty()) {
+        MessageBoxA(g_hw, missing.c_str(), "Launcher", MB_ICONERROR);
+        return;
+    }
     if ((INT_PTR)ShellExecuteA(g_hw, "open", path_of("run.bat").c_str(), NULL, g_dir, SW_HIDE) <= 32) {
         MessageBoxA(g_hw, "Could not start run.bat. Is the game built? (Run Setup.bat first.)", "Launcher", MB_ICONERROR);
         return;
@@ -1695,6 +2008,8 @@ static void scan_line(const std::string& l, FILE* log)
     AcquireSRWLockExclusive(&g_scan_lock);
     if (prog) { changed = g_scan.phase != ph; g_scan.phase = ph; g_scan.done = d; g_scan.total = t; }
     else if (!strncmp(l.c_str(), "@error ", 7)) g_scan.error = l.substr(7);
+    else if (!strncmp(l.c_str(), "@summary ", 9)) g_scan.summary = l.substr(9);
+    else if (!strncmp(l.c_str(), "@eta ", 5)) g_scan.eta = (unsigned)strtoul(l.c_str() + 5, NULL, 10);
     else if (!strncmp(l.c_str(), "shaderscan: ", 12)) g_scan.error = l.substr(12);
     ReleaseSRWLockExclusive(&g_scan_lock);
     if (log && (!prog || changed || d == t)) { fprintf(log, "%s\n", l.c_str()); fflush(log); }
@@ -1766,6 +2081,7 @@ static DWORD WINAPI scan_thread(LPVOID)
 }
 static void scan_cancel()
 {
+    if (g_scan.kind == SCAN_HDUI_REMOVE) return;   // never ended: after its rename the pack is gone, the rest is deleting
     AcquireSRWLockExclusive(&g_scan_lock);
     g_scan.cancel = true;
     if (g_scan.proc) TerminateProcess(g_scan.proc, 1);
@@ -1776,8 +2092,167 @@ static void scan_finish()
     if (g_scan.thread) { WaitForSingleObject(g_scan.thread, INFINITE); CloseHandle(g_scan.thread); g_scan.thread = NULL; }
     KillTimer(g_hw, 2);
     g_scan.active = false;
+    if (g_scan.kind == SCAN_HDUI_REMOVE) {
+        const bool ok = g_scan.exit_code == 0 && !hdui_have_pack();
+        for (auto& s : g_set)
+            if (!strcmp(s.key, "hdui")) s.sel = 0;
+        save_settings();
+        if (g_scan.quit) { DestroyWindow(g_hw); return; }
+        InvalidateRect(g_hw, NULL, FALSE);
+        if (ok) toast("HD UI pack removed; HD UI pack is off.");
+        else MessageBoxA(g_hw, ("mods\\hd_ui could not be removed:\n\n" +
+                                (g_scan.error.empty() ? std::string("unknown error (exit ") + std::to_string(g_scan.exit_code) + "; is the game running?)"
+                                                      : g_scan.error) +
+                                "\n\nHD UI pack is off. Details: logs\\hd_ui_remove.log.").c_str(),
+                         "HD UI pack", MB_OK | MB_ICONWARNING);
+        return;
+    }
     if (g_scan.quit) { DestroyWindow(g_hw); return; }
+    if (g_scan.kind == SCAN_HDUI) {
+        InvalidateRect(g_hw, NULL, FALSE);
+        if (g_scan.cancel) {
+            toast(hdui_have_pack() ? "Cancelled: the HD UI pack keeps what was done (Create HD UI pack continues it)."
+                                   : "Cancelled.");
+            return;
+        }
+        if (g_scan.exit_code == 0) {
+            for (auto& s : g_set)
+                if (!strcmp(s.key, "hdui"))
+                    for (size_t i = 0; i < s.choices.size(); i++) if (!strcmp(s.choices[i].value, "1")) s.sel = (int)i;
+            save_settings();
+            MessageBoxA(g_hw, ((g_scan.summary.empty() ? std::string("The HD UI pack is ready.") : g_scan.summary) +
+                               "\n\nHD UI pack is now on (Advanced > HD UI pack). Your own copy: don't share mods\\hd_ui.").c_str(),
+                        "HD UI pack", MB_OK | MB_ICONINFORMATION);
+        } else {
+            MessageBoxA(g_hw, ("The HD UI pack could not be made:\n\n" +
+                               (g_scan.error.empty() ? std::string("unknown error (exit ") + std::to_string(g_scan.exit_code) + ")"
+                                                     : g_scan.error) +
+                               "\n\nDetails: logs\\hd_ui_pack.log. The game is unchanged.").c_str(),
+                        "HD UI pack", MB_OK | MB_ICONWARNING);
+        }
+        return;
+    }
     play_launch();    // the game starts also when the scan failed or was skipped (logs\shaderscan.log has the details)
+}
+
+// ---- HD UI pack (Saves & tools > Create HD UI pack): HDUIPack.exe (project\\hd_ui_pack.cpp) reads the menu / HUD
+// textures from the game's archives, upscales them with Real-ESRGAN on the graphics card, the CPU if that fails (tools\hdui_upscaler, SHA-256 checked) and
+// writes mods\\hd_ui, which the renderer loads with RSX_HD_UI=1. Same progress panel as the shader scan.
+static std::string hdui_exe() { return path_of("HDUIPack.exe"); }
+static bool hdui_have_pack()
+{
+    return GetFileAttributesA(path_of("mods\\hd_ui\\pack.tsv").c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+// "HDUIPack.exe --status" (reads two small files, starts nothing on the GPU): where the next run upscales: "gpu" (the
+// graphics card; what it does not make, on the CPU) or "cpu" (an earlier run failed on the graphics card:
+// tools\upscaler\gpu_fault.txt) ("" = could not ask); note: why.
+static std::string hdui_gpu_status(std::string& note)
+{
+    note.clear();
+    std::string cl = "\"" + hdui_exe() + "\" --status", out;
+    SECURITY_ATTRIBUTES sa = { sizeof sa, NULL, TRUE };
+    HANDLE rd = NULL, wr = NULL;
+    if (!CreatePipe(&rd, &wr, &sa, 1 << 16)) return "";
+    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
+    STARTUPINFOA si = {}; si.cb = sizeof si;
+    si.dwFlags = STARTF_USESTDHANDLES; si.hStdOutput = si.hStdError = wr;
+    PROCESS_INFORMATION pi = {};
+    const BOOL ok = CreateProcessA(NULL, &cl[0], NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, g_dir, &si, &pi);
+    CloseHandle(wr);
+    if (ok) {
+        if (WaitForSingleObject(pi.hProcess, 5000) == WAIT_TIMEOUT) TerminateProcess(pi.hProcess, 1);
+        char buf[4096]; DWORD n = 0;
+        while (out.size() < 65536 && ReadFile(rd, buf, sizeof buf, &n, NULL) && n) out.append(buf, n);
+        CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    }
+    CloseHandle(rd);
+    const size_t at = out.find("@gpu ");
+    if (at == std::string::npos) return "";
+    std::string l = out.substr(at + 5, out.find_first_of("\r\n", at) - at - 5);
+    const size_t sp = l.find(' ');
+    if (sp != std::string::npos) note = l.substr(sp + 1);
+    return l.substr(0, sp);
+}
+static DWORD WINAPI hdui_thread(LPVOID)
+{
+    CreateDirectoryA(path_of("logs").c_str(), NULL);
+    FILE* log = fopen(path_of("logs\\hd_ui_pack.log").c_str(), "w");
+    AcquireSRWLockExclusive(&g_scan_lock); g_scan.ran = true; g_scan.phase = "read"; ReleaseSRWLockExclusive(&g_scan_lock);
+    PostMessageA(g_hw, WM_SCAN_PROGRESS, 0, 0);
+    g_scan.exit_code = scan_exec("\"" + hdui_exe() + "\"", INFINITE, log);
+    // Cancel ended it (and with it the upscaler) on purpose: its "upscaler running" marker must not read as a PC that
+    // froze while upscaling once the PC restarts
+    if (g_scan.cancel) DeleteFileA(path_of("tools\\upscaler\\upscaler_running.txt").c_str());
+    if (log) fclose(log);
+    PostMessageA(g_hw, WM_SCAN_DONE, 0, 0);
+    return 0;
+}
+// The shared start of the progress panel's worker (shader scan, HD UI pack create / remove): nothing of an earlier
+// run (a Cancel, its summary or error) carries over.
+static void scan_begin(int kind, LPTHREAD_START_ROUTINE fn)
+{
+    g_scan.kind = kind;
+    AcquireSRWLockExclusive(&g_scan_lock);
+    g_scan.cancel = g_scan.ran = g_scan.quit = false;
+    g_scan.phase.clear(); g_scan.error.clear(); g_scan.summary.clear(); g_scan.done = g_scan.total = g_scan.eta = 0;
+    ReleaseSRWLockExclusive(&g_scan_lock);
+    g_scan.exit_code = 0;
+    g_scan.t0 = GetTickCount();
+    g_scan.active = true;
+    g_scan.thread = CreateThread(NULL, 0, fn, NULL, 0, NULL);
+    if (g_scan.thread) { SetTimer(g_hw, 2, 100, NULL); InvalidateRect(g_hw, NULL, FALSE); return; }
+    g_scan.active = false;
+}
+static void hdui_start()
+{
+    if (g_scan.active) return;
+    if (GetFileAttributesA(hdui_exe().c_str()) == INVALID_FILE_ATTRIBUTES) {
+        MessageBoxA(g_hw, "HDUIPack.exe is missing next to the launcher (build.bat makes it).", "HD UI pack", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    // the upscaler keeps the CPU busy: never next to the game
+    if (shc_game_running()) {
+        MessageBoxA(g_hw, "The game is running. Close it first, then create the HD UI pack: the AI upscaler keeps the "
+                          "graphics card and CPU busy.", "HD UI pack", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    std::string note;
+    const std::string mode = hdui_gpu_status(note);
+    std::string msg = hdui_have_pack()
+        ? "Update the HD UI pack?\n\nOnly textures that are not in mods\\hd_ui yet are made."
+        : "Create the HD UI pack?\n\nThe menu and HUD textures in your game files are upscaled 2-4x by an AI model "
+          "(Real-ESRGAN; its 45 MB download the first time) on the graphics card, usually in a few minutes, and needs several GB of disk "
+          "(mods\\hd_ui). You can cancel at any time and continue later.";
+    msg += mode == "cpu"
+        ? "\n\nIt runs on the CPU (about 1-2 hours on a 6-core CPU), at low priority: the PC stays usable, only slower."
+        : "\n\nIf the graphics card fails (a driver error or reset), the AI upscaler is stopped at once and the rest is made "
+          "on the CPU (slower); later runs then use the CPU.";
+    if (!note.empty()) msg += "\n\nNote: " + note;
+    if (MessageBoxA(g_hw, msg.c_str(), "HD UI pack", MB_OKCANCEL | (mode == "cpu" && !note.empty() ? MB_ICONWARNING : MB_ICONINFORMATION)) != IDOK) return;
+    save_settings();
+    scan_begin(SCAN_HDUI, hdui_thread);
+}
+// Remove runs on the worker too (a multi-GB pack takes a while to delete) and has no Cancel: HDUIPack --remove first
+// renames mods\hd_ui away, so ending it later would only leave files behind.
+static DWORD WINAPI hdui_remove_thread(LPVOID)
+{
+    CreateDirectoryA(path_of("logs").c_str(), NULL);
+    FILE* log = fopen(path_of("logs\\hd_ui_remove.log").c_str(), "w");
+    AcquireSRWLockExclusive(&g_scan_lock); g_scan.ran = true; g_scan.phase = "remove"; ReleaseSRWLockExclusive(&g_scan_lock);
+    PostMessageA(g_hw, WM_SCAN_PROGRESS, 0, 0);
+    if (GetFileAttributesA(hdui_exe().c_str()) != INVALID_FILE_ATTRIBUTES)
+        g_scan.exit_code = scan_exec("\"" + hdui_exe() + "\" --remove", INFINITE, log);
+    else { lx_delete_tree(path_of("mods\\hd_ui")); g_scan.exit_code = 0; }
+    if (log) fclose(log);
+    PostMessageA(g_hw, WM_SCAN_DONE, 0, 0);
+    return 0;
+}
+static void hdui_remove()
+{
+    if (g_scan.active) return;
+    if (MessageBoxA(g_hw, "Remove the HD UI pack (mods\\hd_ui)?\n\nThe game goes back to its own menu / HUD textures. "
+                          "Making it again takes the full time.", "HD UI pack", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    scan_begin(SCAN_HDUI_REMOVE, hdui_remove_thread);
 }
 
 static void play()
@@ -1786,13 +2261,8 @@ static void play()
     save_settings(); ctl_save();
     if (!g_scan.checked && !shaderscan_exe().empty()) {
         g_scan.checked = true;
-        g_scan.cancel = g_scan.ran = g_scan.quit = false;
-        g_scan.phase.clear(); g_scan.error.clear(); g_scan.done = g_scan.total = 0;
-        g_scan.t0 = GetTickCount();
-        g_scan.active = true;
-        g_scan.thread = CreateThread(NULL, 0, scan_thread, NULL, 0, NULL);
-        if (g_scan.thread) { SetTimer(g_hw, 2, 100, NULL); InvalidateRect(g_hw, NULL, FALSE); return; }
-        g_scan.active = false;
+        scan_begin(SCAN_SHADERS, scan_thread);
+        if (g_scan.active) return;
     }
     play_launch();
 }
@@ -1814,6 +2284,7 @@ static void click(int i, float x, float y)
             if (MessageBoxA(g_hw, "Put every key, mouse and controller option back to its default?", "Controls",
                             MB_YESNO | MB_ICONQUESTION) == IDYES) { ctl_defaults(); ctl_save(); toast("Controls restored to their defaults."); }
         } else if (w.id == BT_RESET_GFX) restore_graphics();
+        else if (w.id == BT_DECK) deck_preset();
         else if (w.id == BT_FOLDER) ShellExecuteA(g_hw, "open", g_dir, NULL, NULL, SW_SHOWNORMAL);
         else if (w.id == BT_REPORT) port_report_ui(g_hw);
         else if (w.id == BT_LOGS) { CreateDirectoryA(path_of("logs").c_str(), NULL);
@@ -1877,6 +2348,16 @@ static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp)
         case WM_MOUSEMOVE: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN: case WM_LBUTTONUP:
         case WM_MOUSEWHEEL: case WM_CHAR: return 0;
         case WM_CLOSE: g_scan.quit = true; scan_cancel(); return 0;
+        case WM_QUERYENDSESSION: return TRUE;
+        case WM_ENDSESSION:
+            // Windows signs out / shuts down / restarts cleanly: the HD UI pack run is ended now, and its marker
+            // (tools\upscaler\upscaler_running.txt) removed, so the next run does not take this for a crash
+            if (wp && g_scan.kind == SCAN_HDUI) {
+                scan_cancel();
+                if (g_scan.thread) WaitForSingleObject(g_scan.thread, 5000);
+                DeleteFileA(path_of("tools\\upscaler\\upscaler_running.txt").c_str());
+            }
+            return 0;
         default: break;
         }
     }
@@ -1989,10 +2470,11 @@ static int play_headless()
 {
     load_settings();
     save_settings();
-    if (GetFileAttributesA(path_of("build\\Resistance3.exe").c_str()) == INVALID_FILE_ATTRIBUTES) return 3;
+    if (!game_files_missing().empty()) return 3;
     if (!shaderscan_exe().empty()) scan_thread(NULL);
     lx_auto_backup();
     SetEnvironmentVariableA("PORT_CPU_V3", cpu_is_x86_64_v3() ? "1" : "0");   // read by run.bat
+    allow_game_foreground();   // as in play_launch: the game window may take the foreground
     SHELLEXECUTEINFOA se = { sizeof se };
     se.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
     se.lpVerb = "open";
@@ -2023,6 +2505,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR cmd, int show)
     register_extra_options();               // launcher_extra.inc
     dist_init();                            // launcher_dist.inc: "updates" option, Wine / Deck choices
     detect_hardware(cmd);
+    deck_defaults(false);
     lx_framegen_filter();                   // launcher_extra.inc: Frame Generation choices for this GPU
     // non-interactive: "Launcher.exe --detect [--sim-gpu "name" --sim-vram GB --sim-cores N --sim-threads N
     // --sim-screen WxH --sim-hz N]" prints what was detected and recommended; "--table" prints the mapping for

@@ -245,13 +245,25 @@ inline void detect_screen(Hardware& h)
 
 // Wine / Proton (Linux, Steam Deck): ntdll exports wine_get_version. Steam sets SteamDeck=1 on the Deck;
 // its APU also reports as "AMD Custom GPU 0405" (LCD) / "0932" (OLED) or "VanGogh".
+// The Deck's SMBIOS board / product name (Jupiter = LCD, Galileo = OLED), for Windows installed on a Deck.
+#pragma comment(lib, "advapi32.lib")
+inline bool deck_board()
+{
+    static const char* const names[] = { "BaseBoardProduct", "SystemProductName" };
+    for (const char* name : names) {
+        char b[64] = ""; DWORD n = sizeof b;
+        if (RegGetValueA(HKEY_LOCAL_MACHINE, "HARDWARE\\DESCRIPTION\\System\\BIOS", name, RRF_RT_REG_SZ, NULL, b, &n) == ERROR_SUCCESS &&
+            (!_stricmp(b, "Jupiter") || !_stricmp(b, "Galileo"))) return true;
+    }
+    return false;
+}
 inline void detect_platform(Hardware& h)
 {
     HMODULE nt = GetModuleHandleA("ntdll.dll");
     h.wine = nt && GetProcAddress(nt, "wine_get_version") != NULL;
     char v[8] = "";
     h.deck = (GetEnvironmentVariableA("SteamDeck", v, sizeof v) && v[0] == '1') ||
-             has(h.gpu, "Custom GPU 0405") || has(h.gpu, "Custom GPU 0932") || has(h.gpu, "VanGogh");
+             has(h.gpu, "Custom GPU 0405") || has(h.gpu, "Custom GPU 0932") || has(h.gpu, "VanGogh") || deck_board();
     if (h.deck) h.integrated = true;
 }
 
@@ -317,9 +329,16 @@ inline Settings recommend(const Hardware& h, int tier = T_AUTO)
         s.filter = "fsr"; s.sharpen = "0.25";
     }
 
-    // frame rate: 60 doubles the CPU work; 120 only on high-refresh screens with 8+ cores and a fast GPU
+    // frame rate: 60 doubles the CPU work; 120 only on high-refresh screens with 8+ cores and a strong GPU
+    // (RTX 4070 / RX 7800 class: the RSX readbacks make the GPU's frame time part of the CPU's, so an
+    // RTX 2080 Ti / 3070 class card is better served by a steady 60).
+    // Resistance 3: never above 60 automatically. Above ~75 fps the engine's left-stick detection fails
+    // (stand still -> must jump before the stick moves you; ladders need retries; RPCS3 "Unlock FPS" note).
+    // R3_AUTOCONFIG_120=1 restores the old 120 fps recommendation exactly.
+    const char* a120 = getenv("R3_AUTOCONFIG_120");
+    const bool k_auto_high_fps = a120 && a120[0] == '1';
     if (cls == 0 || very_weak_cpu || (cls == 1 && weak_cpu)) s.fps = "30";
-    else if (cls >= 3 && strong_cpu && h.refresh >= 119) s.fps = "120";
+    else if (k_auto_high_fps && cls >= 3 && strong_cpu && h.refresh >= 119) s.fps = "120";
     else s.fps = "60";
 
     static const char* const wins[] = { "3840x2160", "2560x1440", "1920x1080", "1600x900", "1280x720" };
@@ -368,6 +387,13 @@ inline void describe(const Settings& s, char* out, size_t n)
 // what the game reads before the renderer (R2_FPS, RSX_VSYNC, PORT_CPU_PROFILE, R2_SHADER_MODE) and must
 // run first thing in main(). Returns the number of variables set; summary (optional) describes it.
 enum class Phase { renderer, startup };
+// Settings::fsr is in the RPCS3 renderer's RSX_FSR numbering (1 FSR 3.1, 2 DLSS, 4 XeSS). The Direct3D 12
+// renderer (R2_RSX=d3d12) numbers them 1 FSR1, 2 DLAA/DLSS, 3 FSR 3.1, 4 XeSS: its value for `rsx`.
+inline const char* fsr_for_renderer(const char* fsr, const char* rsx)
+{
+    if (!fsr || !rsx || _stricmp(rsx, "d3d12")) return fsr;
+    return !strcmp(fsr, "1") ? "3" : fsr;
+}
 inline int apply_preset_env(const char* preset, Phase phase, char* summary = nullptr, size_t n = 0)
 {
     Hardware h; detect(h);
@@ -375,7 +401,7 @@ inline int apply_preset_env(const char* preset, Phase phase, char* summary = nul
     const Settings s = recommend(h, t);
     const char* vars[][2] = {
         { "RSX_RES_SCALE", s.res }, { "RSX_FILTER", s.filter }, { "RSX_SHARPEN", s.sharpen }, { "RSX_ANISO", s.aniso },
-        { "RSX_FSR", s.fsr }, { "RSX_UPSCALE", !strcmp(s.fsr, "0") ? "1" : s.upscale },
+        { "RSX_FSR", fsr_for_renderer(s.fsr, getenv("R2_RSX")) }, { "RSX_UPSCALE", !strcmp(s.fsr, "0") ? "1" : s.upscale },
         { "R2_FPS", s.fps }, { "RSX_VSYNC", s.vsync }, { "PORT_CPU_PROFILE", s.cpu }, { "R2_SHADER_MODE", s.shader },
     };
     const int count = phase == Phase::startup ? 10 : 6;

@@ -17,6 +17,7 @@ int g_cri_video_dma;
 uint32_t g_spu_image_src_ea, g_spu_image_ls_start, g_spu_image_span;
 uint32_t g_barrier_sync_watch;
 void (*g_spu_put_hook)(uint32_t, uint32_t);
+void (*volatile g_spu_write_watch)(spu_context*, uint32_t, uint32_t, const uint8_t*);
 void* volatile g_sn_defer_ctx;
 volatile unsigned g_sn_defer;
 unsigned long long ps3_ms_now(void) { return 0; }
@@ -32,6 +33,39 @@ void spu_lockline_unlock(void) {}
 void spu_lockguard_check(spu_context* c,uint32_t ea,const uint8_t* p,uint32_t n,const char* what)
 { (void)c;(void)ea;(void)p;(void)n;(void)what; }
 void spu_ch_wake(spu_context* c) { (void)c; }
+/* DMA trace / put-record / watch / label-log diagnostics referenced by spu_dma.h
+ * (spu_channels.c and the port own them in the runtime); inert here. */
+SPU_THREAD_LOCAL spu_dma_trace_ent g_spu_dma_ring[512];
+SPU_THREAD_LOCAL uint32_t g_spu_dma_ring_n;
+SPU_THREAD_LOCAL void* g_spu_putrec;
+SPU_THREAD_LOCAL int g_spu_dry_put;
+int g_spu_jobtrace_id;
+void spu_jobtrace(spu_context* s,uint32_t lsa,uint64_t ea,uint32_t size,uint32_t cmd,int unused)
+{ (void)s;(void)lsa;(void)ea;(void)size;(void)cmd;(void)unused; }
+volatile uint32_t g_dmaw_lo, g_dmaw_hi, g_dmaw_img;
+volatile long g_dmaw_left;
+void spu_dmawatch_log(spu_context* s,uint32_t lsa,uint64_t ea,uint32_t size,uint32_t cmd)
+{ (void)s;(void)lsa;(void)ea;(void)size;(void)cmd; }
+int spu_ls_window_transfer(spu_context* s,uint32_t lsa,uint64_t ea,uint32_t size,uint32_t cmd)
+{ (void)s;(void)lsa;(void)ea;(void)size;(void)cmd;return 0; }
+void spu_phys_trace(const spu_context* s,uint32_t cmd,uint32_t lsa,uint32_t ea,uint32_t size)
+{ (void)s;(void)cmd;(void)lsa;(void)ea;(void)size; }
+void spu_putrec_note(uint32_t ea,const uint8_t* src,uint32_t size) { (void)ea;(void)src;(void)size; }
+void spu_pmtrace(const void* c,uint32_t spu,uint32_t type,uint32_t a,uint32_t b,uint32_t d)
+{ (void)c;(void)spu;(void)type;(void)a;(void)b;(void)d; }
+void ps3_guest_mem_notify_put(uint32_t ea) { (void)ea; }
+volatile int g_semlog_on;
+volatile uint32_t g_semlog_rd_ea;
+void semlog_note_mem(uint32_t a,uint32_t b,uint32_t c,uint32_t d,uint32_t e)
+{ (void)a;(void)b;(void)c;(void)d;(void)e; }
+void semlog_note_read(uint32_t a,uint32_t b,uint32_t c,uint32_t d,uint32_t e)
+{ (void)a;(void)b;(void)c;(void)d;(void)e; }
+volatile uint32_t g_semfix_base;
+void semfix_note_spu(uint32_t a,uint32_t b) { (void)a;(void)b; }
+void semfix_pre_spu(uint32_t a,uint32_t b) { (void)a;(void)b; }
+volatile long g_cpurep_spu_live;
+void cpurep_spu_dma(spu_context* s,uint32_t lsa,uint64_t ea,uint32_t size,uint32_t cmd)
+{ (void)s;(void)lsa;(void)ea;(void)size;(void)cmd; }
 
 static void check(int ok,const char* what)
 { if(!ok){fprintf(stdout,"FAIL: %s\n",what);exit(2);} }

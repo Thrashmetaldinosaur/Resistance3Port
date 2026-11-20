@@ -468,7 +468,7 @@ static void spu_drain_call_impl(spu_context* ctx, uint32_t return_pc);
  * the wall time (low = the lane was preempted or blocked), DMAs per run,
  * other jobs already running at start (lane saturation), and time spent in
  * the guest-memory fault hook (RSX surface flushes).
- * SPU_JOB_BOOST=419[,id...] (0 = off) raises the lane to HIGHEST priority for
+ * SPU_JOB_BOOST=419,425[,id...] (default; 0 = off) raises the lane to HIGHEST priority for
  * the run of those images; gated like the audio lane boost by
  * ps3_host_prio_boost() (off on low core counts). */
 #ifdef _WIN32
@@ -487,7 +487,16 @@ static volatile long long s_sjt_next;
 static int s_sjt_on = -1, s_sjt_igimg = 0;
 static int s_sjt_focus[8], s_sjt_nfocus, s_sjt_boost[8], s_sjt_nboost;
 static long long s_sjt_qf, s_sjt_q0; static unsigned long long s_sjt_t0;
+/* R3_DOF_JOB_CAPTURE (spu_channels.c): image to capture, 0 = off. */
+static int s_sjt_jc;
+int spu_jobcap_init(void);
+void spu_jobcap_begin(spu_context* ctx, long frame);
+void spu_jobcap_end(int how);
+int spu_jobcap_open(void);
+extern volatile long g_port_frame_no;
+extern int g_cpurep_spu_on; void cpurep_spu_init(void); void cpurep_spu_job_begin(spu_context* ctx, int img, uint32_t link, long busy); void cpurep_spu_job_end(int how); /* cpu-replay */
 uint32_t g_sjt_link_a = 0x3F8F4u, g_sjt_link_b = 0x2AA0u;
+void (*volatile g_spu_igjob_begin_hook)(uint32_t r84, int img, int boosted) = 0;
 static SPU_THREAD_LOCAL int t_sjt_img, t_sjt_boosted, t_sjt_prio;
 static SPU_THREAD_LOCAL uint32_t t_sjt_link, t_sjt_d0;
 static SPU_THREAD_LOCAL long long t_sjt_q0, t_sjt_av;
@@ -513,7 +522,10 @@ static void sjt_init(void)
     if ((e = getenv("SPU_IGJOB_LINK")) && *e) g_sjt_link_a = (uint32_t)strtoul(e, 0, 0) & SPU_LS_MASK;
     if ((e = getenv("SPU_IGJOB_IMG")) && *e) s_sjt_igimg = atoi(e);
     s_sjt_nfocus = sjt_list(getenv("SPU_JOB_FOCUS"), s_sjt_focus, 419);
+    /* r7c: 425 = igMobyBsphereUpdate, the job the main thread waits on most
+       (func_007DA018); SPU_JOB_BOOST=419 restores the old set. */
     s_sjt_nboost = sjt_list(getenv("SPU_JOB_BOOST"), s_sjt_boost, 419);
+    if (!getenv("SPU_JOB_BOOST") || !*getenv("SPU_JOB_BOOST")) s_sjt_boost[s_sjt_nboost++] = 425;
     const int pb = ps3_host_prio_boost();
     if (!pb) s_sjt_nboost = 0;
     LARGE_INTEGER f, q; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&q);
@@ -525,6 +537,12 @@ static void sjt_init(void)
             on, fb, s_sjt_nboost ? bb : "off", pb ? "" : " (host prio boost off: low core count)",
             g_sjt_link_a, s_sjt_igimg);
     if (!on) { g_sjt_link_a = g_sjt_link_b = 0xFFFFFFFFu; s_sjt_nboost = 0; }
+    s_sjt_jc = spu_jobcap_init();
+    if (s_sjt_jc && !on) {
+        fprintf(stderr, "[dof-jobcap] needs SPU_JOB_TIMING (it is 0): capture disabled\n");
+        s_sjt_jc = 0;
+    }
+    cpurep_spu_init(); /* cpu-replay */
     s_sjt_on = on;
 }
 static int sjt_in(const int* l, int n, int img) { for (int i = 0; i < n; i++) if (l[i] == img) return 1; return 0; }
@@ -534,6 +552,8 @@ static void sjt_unboost(void)
 }
 static void sjt_drop(void)
 {
+    if (__builtin_expect(g_cpurep_spu_on, 0)) cpurep_spu_job_end(1); /* cpu-replay */
+    if (s_sjt_jc) spu_jobcap_end(1);
     sjt_unboost();
     t_sjt_link = 0;
     _InterlockedDecrement(&s_sjt_active);
@@ -571,6 +591,8 @@ void spu_jobtime_begin(spu_context* ctx, uint32_t link)
         /* Already in a job: an internal jump with lr still holding the link.
          * A record older than 250 ms was abandoned (a halt longjmp). */
         if ((q.QuadPart - t_sjt_q0) * 4 < s_sjt_qf) return;
+        /* A capture run writes megabytes; allow it 2 s before calling it abandoned. */
+        if (s_sjt_jc && spu_jobcap_open() && q.QuadPart - t_sjt_q0 < 2 * s_sjt_qf) return;
         sjt_drop();
     }
     if (img <= 0 || img >= SJT_NIMG) img = 0;
@@ -586,12 +608,19 @@ void spu_jobtime_begin(spu_context* ctx, uint32_t link)
         }
     }
     t_sjt_img = img; t_sjt_link = link; t_sjt_d0 = g_spu_dma_ring_n; t_sjt_av = 0;
+    /* r7d: ig kernel's r84 = this lane's igPm queue completion line (project stubs.cpp SPU_QUEUE_PI). */
+    if (__builtin_expect(g_spu_igjob_begin_hook != 0, 0) && link == g_sjt_link_a)
+        g_spu_igjob_begin_hook(ctx->gpr[84]._u32[0], img, t_sjt_boosted);
+    if (__builtin_expect(s_sjt_jc != 0, 0) && img == s_sjt_jc) spu_jobcap_begin(ctx, g_port_frame_no);
+    if (__builtin_expect(g_cpurep_spu_on, 0)) cpurep_spu_job_begin(ctx, img, link, busy); /* cpu-replay */
     ULONG64 c = 0; QueryThreadCycleTime(GetCurrentThread(), &c); t_sjt_c0 = c;
     QueryPerformanceCounter(&q); t_sjt_q0 = q.QuadPart;
 }
 
 /* Time the guest-memory fault hook spent on this thread (project main.cpp). */
 void spu_jobtime_av(long long qpc_ticks) { if (t_sjt_link) t_sjt_av += qpc_ticks; }
+/* The WWS job image timed on this thread, -1 = none (main.cpp [av-who]). */
+int spu_jobtime_cur_img(void) { return t_sjt_link ? t_sjt_img : -1; }
 
 static void sjt_line(char* b, size_t n, int img, const sjt_stat* d, double us_per_q, double cyc_per_us, double secs)
 {
@@ -651,6 +680,8 @@ static void spu_jobtime_end(void)
     _InterlockedExchangeAdd64(&st->dma, (long long)(uint32_t)(g_spu_dma_ring_n - t_sjt_d0));
     _InterlockedExchangeAdd64(&st->av, t_sjt_av);
     long long m = st->wmax; while (w > m && _InterlockedCompareExchange64(&st->wmax, w, m) != m) m = st->wmax;
+    if (s_sjt_jc) spu_jobcap_end(0);
+    if (__builtin_expect(g_cpurep_spu_on, 0)) cpurep_spu_job_end(0); /* cpu-replay */
     sjt_drop();
     const long long nx = s_sjt_next;
     if (q.QuadPart >= nx && _InterlockedCompareExchange64(&s_sjt_next, q.QuadPart + 5 * s_sjt_qf, nx) == nx && nx)
@@ -659,16 +690,24 @@ static void spu_jobtime_end(void)
 }
 #else
 uint32_t g_sjt_link_a = 0xFFFFFFFFu, g_sjt_link_b = 0xFFFFFFFFu;
+void (*volatile g_spu_igjob_begin_hook)(uint32_t r84, int img, int boosted) = 0;
 void spu_jobtime_begin(spu_context* ctx, uint32_t link) { (void)ctx; (void)link; }
 void spu_jobtime_av(long long qpc_ticks) { (void)qpc_ticks; }
+int spu_jobtime_cur_img(void) { return -1; }
 static SPU_THREAD_LOCAL uint32_t t_sjt_link;
 static void spu_jobtime_end(void) {}
 #endif
 
 /* Resistance port: PS3_FTRACE end of a WWS job (see spu_ft_job_end). */
+/* Called when a drained call to an ig job returns to its link 0x3F8F4 (the
+ * job's 'bi $0' is a plain host return, no indirect-branch hook sees it);
+ * project/r3_native_dof.c. NULL = not installed. */
+void (*volatile g_spu_igjob_return_hook)(spu_context* ctx) = 0;
 void spu_drain_call(spu_context* ctx, uint32_t return_pc)
 {
     spu_drain_call_impl(ctx, return_pc);
+    if (__builtin_expect(g_spu_igjob_return_hook != 0, 0) && (return_pc & SPU_LS_MASK) == 0x3F8F4u)
+        g_spu_igjob_return_hook(ctx);
     if (__builtin_expect(t_sjt_link != 0, 0) && (return_pc & SPU_LS_MASK) == t_sjt_link)
         spu_jobtime_end();
     if ((return_pc & SPU_LS_MASK) == 0x2AA0u && ctx->policy_mode) {
@@ -755,3 +794,4 @@ static void spu_drain_call_impl(spu_context* ctx, uint32_t return_pc)
     }
 #undef SPU_DRAIN_POP_IRQ
 }
+#include "spu_cpurep.inl" /* cpu-replay: SPU job capture (PORT_SPU_CAPTURE) */

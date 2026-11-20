@@ -384,7 +384,21 @@ static uint8_t* ts_running(uint32_t taskset_ea)
     for (int i = 0; i < TS_TRACK; i++) if (!s_ts_run[i].ea) { s_ts_run[i].ea = taskset_ea; return s_ts_run[i].running; }
     return NULL;
 }
-static void ts_lock(void)   { while (InterlockedExchange(&s_ts_lock, 1)) Sleep(0); }
+/* Perf pass 9: test-and-test-and-set. A waiter used to Sleep(0) (a syscall) on every failed
+ * exchange and hammered the line with locked writes; the critical sections are a few loads and
+ * stores, so pause-spin on a plain read first and only fall back to Sleep(0) after 64 laps. */
+static void ts_lock(void)
+{
+    unsigned n = 0;
+    while (InterlockedExchange(&s_ts_lock, 1)) {
+        do {
+#if defined(_WIN32)
+            if (++n < 64) { YieldProcessor(); continue; }
+#endif
+            Sleep(0);
+        } while (s_ts_lock);
+    }
+}
 static void ts_unlock(void) { InterlockedExchange(&s_ts_lock, 0); }
 
 static void spu_taskset_mark(uint32_t taskset_ea, uint32_t t, int on)
@@ -522,7 +536,14 @@ static void async_interp_set_entry(const uint8_t* image, uint32_t size)
 }
 static void async_interp_entry(spu_context* ctx)
 {
-    spu_interp_run(ctx, t_async_interp_entry & SPU_LS_MASK);
+    const uint32_t rc = spu_interp_run(ctx, t_async_interp_entry & SPU_LS_MASK);
+    if (!(ctx->status & (SPU_STATUS_STOPPED_BY_STOP | SPU_STATUS_STOPPED_BY_HALT))) {
+        static volatile LONG s_logged;
+        if (InterlockedIncrement(&s_logged) <= 16)
+            fprintf(stderr, "[spu_workload] interpreted async task (entry 0x%05X) returned "
+                    "0x%08X at pc=0x%05X without a stop\n",
+                    t_async_interp_entry & SPU_LS_MASK, rc, ctx->pc & SPU_LS_MASK);
+    }
 }
 
 static void spu_async_run(spu_async_job* j)
@@ -1358,7 +1379,7 @@ int spu_workload_dispatch_async(const uint8_t* image, uint32_t image_size,
         { const char* e = getenv("SPU_ASYNC_INTERP");
           if (e && *e == '0') return 0; }
         fn = async_interp_entry;
-        image_id = 0;
+        image_id = -1;   /* < 0: pure interpretation, never rejoin another image's lifted code */
         fprintf(stderr, "[spu_workload]   -> running fp=0x%016llX interpreted (entry 0x%05X)\n",
                 (unsigned long long)fp, async_elf_entry(image, image_size));
     }

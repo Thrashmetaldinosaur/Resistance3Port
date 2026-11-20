@@ -1,0 +1,16 @@
+{
+  "pre": {},
+  "post": {
+    "igjob_00E29200_spu_func_00000120": [
+      {
+        "at": 1,
+        "ctx": "void igjob_00E29200_spu_func_00000120(spu_context* ctx) {",
+        "rm": [],
+        "add": [
+          "        { extern int r3nj_gate(spu_context*, int, void (*)(spu_context*)); if (r3nj_gate(ctx, 4 /* R3NJ_K_GEOM_XFORM4 */, igjob_00E29200_spu_func_00000120)) SPU_RET(ctx); }"
+        ]
+      }
+    ]
+  },
+  "preamble": []
+}

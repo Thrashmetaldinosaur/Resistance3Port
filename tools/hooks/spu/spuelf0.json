@@ -1,0 +1,16 @@
+{
+ "pre": {},
+ "post": {
+  "spuelf0_spu_func_00008100": [
+   {
+    "at": 1,
+    "ctx": "void spuelf0_spu_func_00008100(spu_context* ctx) {",
+    "rm": [],
+    "add": [
+     "        { extern int r3nj_gate(spu_context*, int, void (*)(spu_context*)); if (r3nj_gate(ctx, 0 /* R3NJ_K_EDGE_ZLIB */, spuelf0_spu_func_00008100)) SPU_RET(ctx); }"
+    ]
+   }
+  ]
+ },
+ "preamble": []
+}

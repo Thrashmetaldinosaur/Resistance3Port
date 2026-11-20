@@ -252,6 +252,7 @@ static void dbg_mem(uint32_t ea, uint32_t len)
  *                      zeros, -1 in the w column) and, near each, floats whose
  *                      value is the field of view that produced m11 */
 #include <vector>
+#include <algorithm>
 #include <cmath>
 static std::vector<std::pair<uint32_t, float>> s_fscan;
 static float be_f32_at(uint32_t ea)
@@ -593,6 +594,258 @@ static void dbg_prof_frame_threads(unsigned sec)
     dbg_prof_multi(t, nm, 8, sec);
 }
 
+/* ===========================================================================
+ * [thrcpu] per-host-thread CPU accounting.
+ *
+ * The sampling profiler above says WHERE eight chosen threads spend their
+ * time; it cannot say which of the process's ~60 host threads are saturated,
+ * or whether a "busy" thread is computing or spin-waiting. This does: every
+ * PS3_THREAD_CPU seconds one [thrcpu] line on stderr with the busiest
+ * threads, and the full table in every F11 / auto profile.
+ * Resistance 3 (ADS60 port of R2's table): opt-in, PS3_THREAD_CPU=<s>
+ * (0 / unset = off, the default; nothing runs and F11 is unchanged).
+ *
+ *   busy  = QueryThreadCycleTime delta / rdtsc delta (precise, includes
+ *           spinning); usr/krn from the kernel's per-thread times;
+ *   cs/s  = context switches per second (a SwitchToThread spin shows here);
+ *   spin  = share of wall time in sys_timer_usleep < 1 ms (QPC busy-wait),
+ *   slp   = in usleep >= 1 ms, yld/s = sys_ppu_thread_yield calls,
+ *   lwm   = blocked in a contended sys_lwmutex_lock, lwc = in sys_lwcond_wait,
+ *   early = short usleeps ended by ps3_guest_mem_notify.
+ * One NtQuerySystemInformation call per sample plus a cached handle per
+ * thread: no cost to the game threads. */
+#include "ps3_waitstat.h"
+#include <intrin.h>   /* __rdtsc */
+extern "C" const char* ppu_name_by_host_tid(unsigned long tid);
+struct thr_spi_thread {             /* SYSTEM_THREAD_INFORMATION, x64 */
+    LARGE_INTEGER kt, ut, ct; ULONG wait_time; PVOID start;
+    HANDLE pid, tid; LONG prio, base_prio; ULONG cs, state, wait_reason;
+};
+static_assert(sizeof(thr_spi_thread) == 0x50, "SYSTEM_THREAD_INFORMATION layout");
+struct thr_row { DWORD tid; unsigned long long cyc, kt, ut; ULONG cs; };
+struct thr_snap {
+    unsigned long long tsc, qpc; int n;
+    thr_row r[512];
+    ps3_waitstat ws[PS3_WAITSTAT_MAX];
+};
+static SRWLOCK s_thr_lock = SRWLOCK_INIT;
+static struct { DWORD tid; HANDLE h; unsigned gen; } s_thr_h[1024];
+static int s_thr_hn = 0;
+static unsigned s_thr_gen = 0;
+static unsigned char* s_thr_buf = NULL;
+static ULONG s_thr_bufsz = 0;
+static DWORD s_thrcpu_tid = 0;
+
+static HANDLE thr_handle(DWORD tid)
+{
+    for (int i = 0; i < s_thr_hn; i++)
+        if (s_thr_h[i].tid == tid) { s_thr_h[i].gen = s_thr_gen; return s_thr_h[i].h; }
+    if (s_thr_hn >= 1024) return NULL;
+    HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (!h) return NULL;
+    s_thr_h[s_thr_hn].tid = tid; s_thr_h[s_thr_hn].h = h; s_thr_h[s_thr_hn].gen = s_thr_gen;
+    s_thr_hn++;
+    return h;
+}
+
+static int thr_take(thr_snap* s)
+{
+    typedef LONG (WINAPI* nqsi_t)(ULONG, PVOID, ULONG, PULONG);
+    static nqsi_t nqsi = (nqsi_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation");
+    s->n = 0;
+    if (!nqsi) return 0;
+    AcquireSRWLockExclusive(&s_thr_lock);
+    for (int tries = 0; tries < 4; tries++) {
+        ULONG need = 0;
+        LONG st = s_thr_buf ? nqsi(5 /* SystemProcessInformation */, s_thr_buf, s_thr_bufsz, &need) : (LONG)0xC0000004;
+        if (st == 0) break;
+        if (st != (LONG)0xC0000004) { ReleaseSRWLockExclusive(&s_thr_lock); return 0; }
+        if (s_thr_buf) VirtualFree(s_thr_buf, 0, MEM_RELEASE);
+        s_thr_bufsz = (need > s_thr_bufsz ? need : s_thr_bufsz) + (1u << 20);
+        s_thr_buf = (unsigned char*)VirtualAlloc(NULL, s_thr_bufsz, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!s_thr_buf) { s_thr_bufsz = 0; ReleaseSRWLockExclusive(&s_thr_lock); return 0; }
+        if (tries == 3) { ReleaseSRWLockExclusive(&s_thr_lock); return 0; }
+    }
+    s_thr_gen++;
+    const DWORD pid = GetCurrentProcessId();
+    for (unsigned char* p = s_thr_buf;;) {
+        const ULONG next = *(const ULONG*)p, nthr = *(const ULONG*)(p + 4);
+        const DWORD ppid = (DWORD)(uintptr_t)*(HANDLE const*)(p + 0x50);
+        if (ppid == pid) {
+            const thr_spi_thread* t = (const thr_spi_thread*)(p + 0x100);
+            for (ULONG i = 0; i < nthr && s->n < 512; i++) {
+                thr_row& r = s->r[s->n++];
+                r.tid = (DWORD)(uintptr_t)t[i].tid;
+                r.kt = (unsigned long long)t[i].kt.QuadPart; r.ut = (unsigned long long)t[i].ut.QuadPart;
+                r.cs = t[i].cs; r.cyc = 0;
+                HANDLE h = thr_handle(r.tid);
+                ULONG64 c = 0;
+                if (h && QueryThreadCycleTime(h, &c)) r.cyc = c;
+            }
+            break;
+        }
+        if (!next) break;
+        p += next;
+    }
+    /* close the handles of threads that have exited */
+    for (int i = 0; i < s_thr_hn;) {
+        if (s_thr_h[i].gen != s_thr_gen) { CloseHandle(s_thr_h[i].h); s_thr_h[i] = s_thr_h[--s_thr_hn]; }
+        else i++;
+    }
+    LARGE_INTEGER q; QueryPerformanceCounter(&q);
+    s->qpc = (unsigned long long)q.QuadPart; s->tsc = __rdtsc();
+    memcpy(s->ws, (const void*)g_ps3_waitstat, sizeof s->ws);
+    ReleaseSRWLockExclusive(&s_thr_lock);
+    return s->n;
+}
+
+static void thr_name(DWORD tid, char* out, size_t cap)
+{
+    out[0] = 0;
+    if (!tid) return;
+    if (tid == s_dbg_main_tid) { snprintf(out, cap, "main"); return; }
+    if (tid == (DWORD)rsx_fifo_host_tid()) { snprintf(out, cap, "RSX-FIFO"); return; }
+    if (tid == (DWORD)rsx_render_host_tid()) { snprintf(out, cap, "RSX-render"); return; }
+    if (tid == s_thrcpu_tid) { snprintf(out, cap, "thrcpu"); return; }
+    for (unsigned i = 0; i < 2; i++)
+        if (tid == (DWORD)spu_raw_host_tid(i)) { snprintf(out, cap, "rawSPU%u", i); return; }
+    for (unsigned i = 0; i < 8; i++)
+        if (tid == (DWORD)spurs_lane_host_tid(i)) { snprintf(out, cap, "SPURS%u", i); return; }
+    if (const char* g = ppu_name_by_host_tid(tid)) { snprintf(out, cap, "ppu:%s", g); return; }
+    HANDLE h = OpenThread(THREAD_QUERY_INFORMATION | THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (!h) h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (!h) { snprintf(out, cap, "tid%lu", (unsigned long)tid); return; }
+    typedef HRESULT (WINAPI* gtd_t)(HANDLE, PWSTR*);
+    static gtd_t gtd = (gtd_t)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+    PWSTR d = NULL;
+    if (gtd && SUCCEEDED(gtd(h, &d)) && d && d[0]) {
+        snprintf(out, cap, "%ls", d);
+        LocalFree(d); CloseHandle(h); return;
+    }
+    if (d) LocalFree(d);
+    /* else where it started: module + RVA (symbolize exe RVAs with the pdb) */
+    typedef LONG (WINAPI* nqit_t)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+    static nqit_t nqit = (nqit_t)GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQueryInformationThread");
+    PVOID sa = NULL;
+    if (nqit && nqit(h, 9 /* ThreadQuerySetWin32StartAddress */, &sa, sizeof sa, NULL) == 0 && sa) {
+        HMODULE m = NULL;
+        if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                               (LPCSTR)sa, &m) && m) {
+            char mp[MAX_PATH]; GetModuleFileNameA(m, mp, sizeof mp);
+            const char* b = strrchr(mp, 92); b = b ? b + 1 : mp;
+            snprintf(out, cap, "%s+0x%llX", m == GetModuleHandleA(NULL) ? "exe" : b,
+                     (unsigned long long)((uintptr_t)sa - (uintptr_t)m));
+        } else snprintf(out, cap, "start@%p", sa);
+    } else snprintf(out, cap, "tid%lu", (unsigned long)tid);
+    CloseHandle(h);
+}
+
+/* table = 0: one [thrcpu] line with the top `maxn`; 1: a full table. */
+static void thr_report(const thr_snap& a, const thr_snap& b, int maxn, int table, void (*out)(const char*))
+{
+    static const double qf = (double)ps3_qpc_freq();
+    const double secs = (double)(b.qpc - a.qpc) / qf;
+    const double dtsc = (double)(b.tsc - a.tsc);
+    if (secs <= 0.05 || dtsc <= 0) return;
+    struct R { DWORD tid; double busy, usr, krn, csps; int ws; };
+    static R rows[512];
+    int n = 0; double total = 0;
+    for (int i = 0; i < b.n; i++) {
+        const thr_row& y = b.r[i];
+        const thr_row* x = NULL;
+        for (int j = 0; j < a.n; j++) if (a.r[j].tid == y.tid) { x = &a.r[j]; break; }
+        R& r = rows[n];
+        r.tid = y.tid;
+        r.busy = x && y.cyc >= x->cyc ? 100.0 * (double)(y.cyc - x->cyc) / dtsc : 0;
+        r.usr  = x ? 100.0 * (double)(y.ut - x->ut) / (secs * 1e7) : 0;
+        r.krn  = x ? 100.0 * (double)(y.kt - x->kt) / (secs * 1e7) : 0;
+        r.csps = x ? (double)(y.cs - x->cs) / secs : 0;
+        if (!y.cyc && r.usr + r.krn > 0) r.busy = r.usr + r.krn;   /* no handle: kernel times */
+        r.ws = -1;
+        for (int k = 0; k < PS3_WAITSTAT_MAX; k++) if (b.ws[k].tid == y.tid) { r.ws = k; break; }
+        total += r.busy;
+        n++;
+    }
+    std::sort(rows, rows + n, [](const R& p, const R& q) { return p.busy > q.busy; });
+    char ln[8192]; int p = 0;
+    SYSTEM_INFO si; GetSystemInfo(&si);
+    if (table)
+        p = snprintf(ln, sizeof ln, "[thrcpu] %.1f s, %d threads, %.2f of %lu logical CPUs busy\n"
+                     "  %-26s %6s %5s %5s %8s | %5s %5s %7s %5s %5s %6s\n", secs, n, total / 100.0,
+                     (unsigned long)si.dwNumberOfProcessors, "thread", "busy%", "usr%", "krn%", "cs/s",
+                     "spin%", "slp%", "yld/s", "lwm%", "lwc%", "early");
+    else
+        p = snprintf(ln, sizeof ln, "[thrcpu] %.1fs %.2f cpus:", secs, total / 100.0);
+    for (int i = 0; i < n && i < maxn; i++) {
+        const R& r = rows[i];
+        if (r.busy < (table ? 0.5 : 2.0)) break;
+        char nm[96]; thr_name(r.tid, nm, sizeof nm);
+        double spin = 0, slp = 0, yld = 0, lwm = 0, lwc = 0; unsigned long long early = 0;
+        if (r.ws >= 0) {
+            const ps3_waitstat& y = b.ws[r.ws]; const ps3_waitstat& x = a.ws[r.ws];
+            const double w = secs * qf / 100.0;
+            if (x.tid == y.tid) {
+                spin = (double)(y.short_qpc - x.short_qpc) / w; slp = (double)(y.long_qpc - x.long_qpc) / w;
+                yld = (double)(y.yield_n - x.yield_n) / secs;
+                lwm = (double)(y.lwm_block_qpc - x.lwm_block_qpc) / w; lwc = (double)(y.lwc_wait_qpc - x.lwc_wait_qpc) / w;
+                early = y.early_n - x.early_n;
+            }
+        }
+        if (p >= (int)sizeof ln - 200) break;
+        if (table)
+            p += snprintf(ln + p, sizeof ln - p, "  %-26.26s %6.1f %5.1f %5.1f %8.0f | %5.1f %5.1f %7.0f %5.1f %5.1f %6llu\n",
+                          nm, r.busy, r.usr, r.krn, r.csps, spin, slp, yld, lwm, lwc, early);
+        else {
+            p += snprintf(ln + p, sizeof ln - p, "%s %s %.0f%%", i ? " |" : "", nm, r.busy);
+            if (spin >= 1 || slp >= 1 || lwm >= 1 || lwc >= 1)
+                p += snprintf(ln + p, sizeof ln - p, "(spin %.0f slp %.0f lwm %.0f lwc %.0f)", spin, slp, lwm, lwc);
+            if (r.csps >= 20000) p += snprintf(ln + p, sizeof ln - p, "[%.0fk cs/s]", r.csps / 1000);
+        }
+    }
+    if (!table) p += snprintf(ln + p, sizeof ln - p, "\n");
+    out(ln);
+}
+
+static void thr_out_stderr(const char* s) { fputs(s, stderr); }
+static DWORD WINAPI thrcpu_monitor(LPVOID param)
+{
+    const unsigned sec = (unsigned)(uintptr_t)param;
+    s_thrcpu_tid = GetCurrentThreadId();
+    typedef HRESULT (WINAPI *sd_t)(HANDLE, PCWSTR);
+    if (sd_t sd = (sd_t)GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadDescription"))
+        sd(GetCurrentThread(), L"thrcpu");
+    static thr_snap s[2];
+    int cur = 0;
+    thr_take(&s[cur]);
+    for (;;) {
+        Sleep(sec * 1000);
+        thr_take(&s[cur ^ 1]);
+        thr_report(s[cur], s[cur ^ 1], 14, 0, thr_out_stderr);
+        cur ^= 1;
+    }
+}
+/* PS3_THREAD_CPU=<seconds> (R3: default 0 = off) */
+static int s_thrcpu_sec = 0;
+static void thrcpu_start(void)
+{
+    const char* e = getenv("PS3_THREAD_CPU");
+    const int sec = e && *e ? atoi(e) : 0;
+    s_thrcpu_sec = sec > 0 ? sec : 0;
+    if (sec > 0) { HANDLE h = CreateThread(NULL, 0, thrcpu_monitor, (LPVOID)(uintptr_t)sec, 0, NULL); if (h) CloseHandle(h);
+                   fprintf(stderr, "[thrcpu] per-thread CPU table every %d s (PS3_THREAD_CPU)%c", sec, 10); }
+}
+/* The F11 / auto profile, plus the per-thread CPU table over the same window. */
+static void dbg_prof_frame_threads_cpu(unsigned sec)
+{
+    if (!s_thrcpu_sec) { dbg_prof_frame_threads(sec); return; }
+    static thr_snap a, b;
+    thr_take(&a);
+    dbg_prof_frame_threads(sec);
+    thr_take(&b);
+    thr_report(a, b, 64, 1, dbg_out_str);
+}
+
+
 /* Resistance port: give the main guest thread a physical core to itself.
  * The main thread is the frame-rate limiter (lifted game code), and this
  * process runs far more busy threads than the CPU has: SPURS lanes and raw
@@ -601,7 +854,20 @@ static void dbg_prof_frame_threads(unsigned sec)
  * second: main -> logical CPU PORT_MAIN_CPU (default 2), every other thread
  * of the process -> all CPUs except that one and its sibling (CPU ^ 1).
  * PORT_MAIN_CORE=0 disables. */
+extern "C" unsigned long spurs_synth_host_tid(void);   /* cellSpurs.c */
+/* What main_core_keeper decided, for the P-core placement (cpu_profile.inc, port_cpu_sets.h): state 0 = not yet,
+ * 1 = it hard-pins (rest = the mask every other thread gets), 2 = it does not pin. tid: the threads it pinned --
+ * main, RSX FIFO thread / rsx::thread, rawSPU0, audio synth lane. */
+extern "C" { volatile long port_keeper_state = 0; volatile unsigned long long port_keeper_rest = 0;
+             volatile unsigned long port_keeper_tid[4] = { 0, 0, 0, 0 }; }
+static DWORD main_core_keeper_pin(void);
 static DWORD WINAPI main_core_keeper(LPVOID)
+{
+    const DWORD r = main_core_keeper_pin();   /* returns only when it does not pin */
+    InterlockedExchange(&port_keeper_state, 2);
+    return r;
+}
+static DWORD main_core_keeper_pin(void)
 {
     const char* e = getenv("PORT_MAIN_CPU");
     /* Default CPUs come from the real topology (cpu_profile.inc, P-cores
@@ -645,10 +911,14 @@ static DWORD WINAPI main_core_keeper(LPVOID)
     /* CPU pass: rawSPU0 (the SPU job kernel the main thread waits on, ~98%
      * busy) gets the next core to itself as well -- it used to share the rest
      * mask, and an SMT sibling, with the SPURS lanes and rsx::thread.
-     * PORT_SPU0_CPU=<cpu> (default 6 with >= 12 logical CPUs), -1 off. */
+     * PORT_SPU0_CPU=<cpu> pins it there, -1 off. Default off in R3: R3 runs
+     * everything through SPURS ("[SPU] initialize(nspu=6, nrawspu=0)", no
+     * rawSPU0 thread in any log), so the reserved core sat idle while the six
+     * SPURS lanes, RSX workers, driver and audio shared the other 3 cores
+     * (rest 0xF03 -> 0xFC3 on 6C/12T). */
     int nlog = 0; for (DWORD_PTR m = proc; m; m &= m - 1) nlog++;
     const char* se = getenv("PORT_SPU0_CPU");
-    const int scpu = se ? atoi(se) : (nlog >= 12 ? topo_cpu(3, 6) : -1);
+    const int scpu = se ? atoi(se) : -1;
     DWORD_PTR smine = 0, spair = 0;
     if (scpu >= 0 && scpu < 64) {
         smine = (DWORD_PTR)1 << scpu; spair = smine | core_of(scpu);
@@ -670,20 +940,61 @@ static DWORD WINAPI main_core_keeper(LPVOID)
      * hot thread owns -- every pinned hot thread keeps its SMT sibling idle.
      * 1 = also the siblings of the rawSPU0 and FIFO cores (2 more logical
      * CPUs on 6C/12T); 2 = also the main thread's sibling. More room for the
-     * SPURS lanes, at the cost of SMT contention on those hot threads. */
+     * SPURS lanes, at the cost of SMT contention on those hot threads.
+     * spu0 = only the rawSPU0 core's sibling (R2's default: there rawSPU0 is
+     * ~90% GETLLAR polling, so a lane on its sibling runs ~1.18x slower vs
+     * ~1.7x lane-on-lane). Opt-in here until R3's rawSPU0 load is measured. */
     const char* rs = getenv("PORT_REST_SMT");
-    const int rest_smt = rs ? atoi(rs) : 0;
+    const int rest_smt = (rs && !_stricmp(rs, "spu0")) ? -1 : rs ? atoi(rs) : 0;
+    if (rest_smt == -1) rest |= spair & ~smine;
     if (rest_smt >= 1) rest |= (fpair & ~fmine) | (spair & ~smine);
     if (rest_smt >= 2) rest |= pair & ~mine;
-    if (!(proc & mine) || !rest) return 0;
-    /* Thread snapshot every 1 s while threads keep appearing, then every
+    /* The SPURS audio synth lane (one lane, ~98% of realtime on R2 even on a
+     * 5600X: R2 scratch\r2_audio_lowcore.md, scratch\cpu_nospin.md).
+     *   PORT_SYNTH_CPU=<cpu>: hard-pin it there; that whole core leaves the
+     *     rest mask (its SMT sibling stays idle), kept only while >= 4 CPUs
+     *     remain for everything else.
+     *   unset, exactly 12 logical CPUs (the 6C/12T profile): a soft ideal-
+     *     processor hint on the last whole core of the rest mask, away from
+     *     core 0's interrupts; it still runs anywhere in the rest mask.
+     *   unset, > 12 logical CPUs: nothing (as before).
+     * PORT_PLACE_AUDIO=0 = neither. */
+    const char* yae = getenv("PORT_PLACE_AUDIO");
+    const char* ye = getenv("PORT_SYNTH_CPU");
+    int ycpu = -1, yideal = -1;
+    DWORD_PTR ymine = 0;
+    if (!(yae && *yae && atoi(yae) == 0)) {
+        if (ye && *ye && atoi(ye) >= 0 && atoi(ye) < 64) {
+            ycpu = atoi(ye);
+            const DWORD_PTR ym = (DWORD_PTR)1 << ycpu, yp = ym | core_of(ycpu);
+            const DWORD_PTR left = rest & ~yp;
+            if ((proc & ym) && !(yp & (pair | fpair | spair)) && (!pm || (pm & ym)) &&
+                (pm ? port_popcount_dt(left & pm) : port_popcount_dt(left)) >= 4) { ymine = ym; rest = left; }
+            else fprintf(stderr, "[affinity] PORT_SYNTH_CPU=%d unusable (hot core, outside the mask or < 4 CPUs left): not pinned%c", ycpu, 10);
+        } else if (!(ye && *ye) && nlog == 12) {
+            for (int c = 63; c >= 0 && yideal < 0; c--) {
+                const int f = topo_cpu(c, -1);
+                if (f < 0 || f >= 64) continue;
+                const DWORD_PTR cm = core_of(f);
+                if ((cm & rest) == cm && (!pm || (pm >> f & 1))) yideal = f;
+            }
+        }
+    }
+    if (!(proc & mine) || !rest) return 0;    /* Thread snapshot every 1 s while threads keep appearing, then every
      * PORT_KEEPER_MS (default 5000) -- each snapshot walks every thread of the
      * system, and at 1 Hz the two keepers were 4-7% CPU each. */
     const char* ke = getenv("PORT_KEEPER_MS");
     const DWORD idle_ms = ke && atoi(ke) >= 250 ? (DWORD)atoi(ke) : 5000;
-    fprintf(stderr, "[affinity] main thread %lu -> CPU %d, RSX FIFO/rsx::thread -> CPU %d, rawSPU0 -> CPU %d, other threads -> mask 0x%llX (rescan %lu ms, PORT_PIN_TOPO=%d PORT_REST_SMT=%d)%c",
+    fprintf(stderr, "[affinity] main thread %lu -> CPU %d, RSX FIFO/rsx::thread -> CPU %d, rawSPU0 -> CPU %d, other threads -> mask 0x%llX (rescan %lu ms, PORT_PIN_TOPO=%d PORT_REST_SMT=%s)%c",
             (unsigned long)s_dbg_main_tid, cpu, fmine ? fcpu : -1, smine ? scpu : -1, (unsigned long long)rest,
-            (unsigned long)idle_ms, topo, rest_smt, 10);
+            (unsigned long)idle_ms, topo, rest_smt == -1 ? "spu0" : rest_smt >= 2 ? "2" : rest_smt == 1 ? "1" : "0", 10);
+    if (ymine || yideal >= 0)
+        fprintf(stderr, "[affinity] audio synth lane -> %s CPU %d (PORT_SYNTH_CPU=<cpu> pins, PORT_PLACE_AUDIO=0 off)%c",
+                ymine ? "pinned to" : "ideal", ymine ? ycpu : yideal, 10);
+    port_keeper_rest = (unsigned long long)rest;
+    port_keeper_tid[0] = s_dbg_main_tid;
+    InterlockedExchange(&port_keeper_state, 1);
+    DWORD syn_done = 0;
     typedef HRESULT (WINAPI* gtd_t)(HANDLE, PWSTR*);
     static gtd_t gtd = (gtd_t)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
     DWORD fifo_done = 0, spu0_done = 0;
@@ -698,8 +1009,26 @@ static DWORD WINAPI main_core_keeper(LPVOID)
         const DWORD stid = smine ? (DWORD)spu_raw_host_tid(0) : 0;
         if (stid && stid != spu0_done) {
             HANDLE sh = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, stid);
-            if (sh) { SetThreadAffinityMask(sh, smine); CloseHandle(sh); spu0_done = stid; fresh = 1;
+            if (sh) { SetThreadAffinityMask(sh, smine); CloseHandle(sh); spu0_done = stid; fresh = 1; port_keeper_tid[2] = stid;
                       fprintf(stderr, "[affinity] rawSPU0 thread %lu pinned to CPU %d%c", (unsigned long)stid, scpu, 10); }
+        }
+        const DWORD ytid = (ymine || yideal >= 0) ? (DWORD)spurs_synth_host_tid() : 0;
+        if (ytid && ytid != syn_done && ytid != stid && ytid != s_dbg_main_tid) {
+            HANDLE yh = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, ytid);
+            if (yh) {
+                if (ymine) SetThreadAffinityMask(yh, ymine);
+                else SetThreadIdealProcessor(yh, (DWORD)yideal);
+                CloseHandle(yh);
+                /* the list moved to another lane: the old one rejoins the rest */
+                if (ymine && syn_done) {
+                    HANDLE oh = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, syn_done);
+                    if (oh) { SetThreadAffinityMask(oh, rest); CloseHandle(oh); }
+                }
+                syn_done = ytid; fresh = 1;
+                if (ymine) port_keeper_tid[3] = ytid;
+                fprintf(stderr, "[affinity] audio synth lane thread %lu %s CPU %d%c", (unsigned long)ytid,
+                        ymine ? "pinned to" : "ideal", ymine ? ycpu : yideal, 10);
+            }
         }
         HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         THREADENTRY32 te; te.dwSize = sizeof te;
@@ -708,10 +1037,11 @@ static DWORD WINAPI main_core_keeper(LPVOID)
                 if (te.th32OwnerProcessID != pid) continue;
                 const DWORD tid = te.th32ThreadID;
                 if (tid == stid) continue;
+                if (ymine && tid == syn_done) continue;
                 if (ftid && tid == ftid) {
                     if (fifo_done != ftid) {
                         HANDLE fh = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, ftid);
-                        if (fh) { SetThreadAffinityMask(fh, fmine); CloseHandle(fh); fifo_done = ftid; fresh = 1;
+                        if (fh) { SetThreadAffinityMask(fh, fmine); CloseHandle(fh); fifo_done = ftid; fresh = 1; port_keeper_tid[1] = ftid;
                                   fprintf(stderr, "[affinity] RSX FIFO thread %lu pinned to CPU %d%c", (unsigned long)ftid, fcpu, 10); }
                     }
                     continue;
@@ -728,7 +1058,7 @@ static DWORD WINAPI main_core_keeper(LPVOID)
                 if (gtd && SUCCEEDED(gtd(th, &d)) && d && d[0]) { named = 1; is_rsx = !wcscmp(d, L"rsx::thread"); }
                 if (d) LocalFree(d);
                 if (is_rsx && fmine && !fifo_done) {
-                    SetThreadAffinityMask(th, fmine); fifo_done = tid;
+                    SetThreadAffinityMask(th, fmine); fifo_done = tid; port_keeper_tid[1] = tid;
                     fprintf(stderr, "[affinity] rsx::thread %lu pinned to CPU %d%c", (unsigned long)tid, fcpu, 10);
                 } else if (k == nd) {
                     SetThreadAffinityMask(th, tid == s_dbg_main_tid ? mine : rest);
@@ -1065,7 +1395,7 @@ static DWORD WINAPI debug_console(LPVOID param)
                 char* sl = strrchr(fp, 92);
                 if (sl) { strcpy(sl + 1, "ftrace.now");
                           FILE* ff = fopen(fp, "wb"); if (ff) { fputs("10", ff); fclose(ff); } } }
-              dbg_prof_frame_threads(6);
+              dbg_prof_frame_threads_cpu(6);
               dbg_fifo_mhist(3);
               if (s_dbg_out) { fclose(s_dbg_out); s_dbg_out = NULL; }
               fprintf(stderr, "[dbg] F11 profile written%c", 10);
@@ -1115,7 +1445,7 @@ static DWORD WINAPI debug_console(LPVOID param)
                 /* v124: the dips are on the RSX side now -- the render thread
                  * (D3D12 recording) and the FIFO thread (decode + prepass) first,
                  * then the main thread */
-                dbg_prof_frame_threads(6);
+                dbg_prof_frame_threads_cpu(6);
                 if (s_dbg_out) { fclose(s_dbg_out); s_dbg_out = NULL; }
                 fprintf(stderr, "[dbg] auto-profile written%c", 10);
                 ap_last = cellGcm_flip_request_count();

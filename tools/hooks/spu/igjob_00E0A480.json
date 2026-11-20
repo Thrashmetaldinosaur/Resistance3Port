@@ -1,0 +1,36 @@
+{
+  "pre": {},
+  "post": {
+    "igjob_00E0A480_spu_func_0000C288": [
+      {
+        "at": 1,
+        "ctx": "void igjob_00E0A480_spu_func_0000C288(spu_context* ctx) {",
+        "rm": [],
+        "add": [
+          "        { extern int r3nj_gate(spu_context*, int, void (*)(spu_context*)); if (r3nj_gate(ctx, 1 /* R3NJ_K_BINK_IDCT_PUT */, igjob_00E0A480_spu_func_0000C288)) SPU_RET(ctx); }"
+        ]
+      }
+    ],
+    "igjob_00E0A480_spu_func_0000C8C0": [
+      {
+        "at": 1,
+        "ctx": "void igjob_00E0A480_spu_func_0000C8C0(spu_context* ctx) {",
+        "rm": [],
+        "add": [
+          "        { extern int r3nj_gate(spu_context*, int, void (*)(spu_context*)); if (r3nj_gate(ctx, 2 /* R3NJ_K_BINK_IDCT_PUT2X */, igjob_00E0A480_spu_func_0000C8C0)) SPU_RET(ctx); }"
+        ]
+      }
+    ],
+    "igjob_00E0A480_spu_func_0000CF30": [
+      {
+        "at": 1,
+        "ctx": "void igjob_00E0A480_spu_func_0000CF30(spu_context* ctx) {",
+        "rm": [],
+        "add": [
+          "        { extern int r3nj_gate(spu_context*, int, void (*)(spu_context*)); if (r3nj_gate(ctx, 3 /* R3NJ_K_BINK_IDCT_ADD */, igjob_00E0A480_spu_func_0000CF30)) SPU_RET(ctx); }"
+        ]
+      }
+    ]
+  },
+  "preamble": []
+}

@@ -6,7 +6,7 @@
     RegionLabel = 'US'
     AppVer      = '01.00'
     TitleMatch  = 'Resistance.?3'                 # other regions of the same game (for a clearer message)
-    Required    = @('PS3_GAME/PARAM.SFO', 'PS3_GAME/USRDIR/EBOOT.BIN')
+    Required    = @('PS3_GAME/PARAM.SFO', 'PS3_GAME/USRDIR/EBOOT.BIN', 'PS3_GAME/USRDIR/packed/game/game.psarc')
     Program     = @('PS3_GAME/USRDIR/EBOOT.BIN')   # the PS3 program file Setup decrypts
     Sha1        = @{
         'PS3_GAME/USRDIR/EBOOT.BIN' = '43bad7101e8e54b1f37f65674affef59bfb2ff53'

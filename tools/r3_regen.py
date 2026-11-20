@@ -69,6 +69,11 @@ def spu_elfs(d):
 IGPM = dict(off=0xE18F80, size=0x230, base=0xA00, entry=0xA00, img=2)
 IGKERNEL = dict(off=0xE18A00, size=0x510, base=0x3F580, entry=0x3F5A0, code_end=0x3F9A8, img=3)
 IGJOB_IMG, IGPIC_IMG, WWSPIC_IMG = 400, 600, 900
+# WWS plugin entries reached only at run time that entry discovery misses.
+# FFB200+0x6F8: right after the unconditional `br` that ends group 0x2D0, so it
+# was folded into nothing and the job ran in the interpreter ("[spu] unlifted job
+# code at LS 0x11978", plugin at LS 0x11280, during level/sound-bank loads).
+WWSPIC_EXTRA = {0x00FFB200: [0x6F8]}
 
 
 def spu_blobs(d, elfs):
@@ -206,11 +211,11 @@ def write_workloads(path, d, plain_elfs, igjobs, igpics, wwspics):
     open(path, 'w', newline='\n').write('\n'.join(L))
 
 
-def spu(port, tk, eboot, work):
+def spu(port, tk, eboot, work, spudir=None):
     sys.path.insert(0, tk)
     from wrap_spu_elf import wrap
     from concurrent.futures import ThreadPoolExecutor
-    spudir = os.path.join(port, 'project', 'spu')
+    spudir = spudir or os.path.join(port, 'project', 'spu')
     d = open(eboot, 'rb').read()
     env = dict(os.environ, PYTHONPATH=tk)
     out = os.path.join(work, 'spu')
@@ -269,6 +274,7 @@ def spu(port, tk, eboot, work):
             ex = [0x30]
             f0 = struct.unpack_from('>I', d, o + 0x10)[0]
             if 0x30 <= f0 < span and not f0 & 3: ex.append(f0)
+            ex += [a for a in WWSPIC_EXTRA.get(va, ()) if 0x30 <= a < span]
             pe = image(nm, raw, 0, 0x30)
             jobs.append((nm, lift_cmd(tk, pe, out, nm, 0, ex, lo=0x30, pic=True, rel=True), pe, 0, span))
             wwspics.append([nm, va, span, WWSPIC_IMG + len(wwspics)])
@@ -309,14 +315,33 @@ def spu(port, tk, eboot, work):
     write_workloads(os.path.join(spudir, 'spu_workloads.c'), d, plain_elfs, igjobs, igpics, wwspics)
     print('[spu] register cache...', flush=True)
 
+    # The port's hand edits to lifted SPU modules (native kernel gates etc.), kept as data in
+    # tools/hooks/spu/<mod>.json (tools/spu_hooks.py): 'pre' hunks go in before the register-cache
+    # pass, 'post' hunks after all passes. Each hunk is checked against the fresh text (removed lines +
+    # the line before it); a hook that no longer matches stops the regen instead of silently vanishing.
+    hk = os.path.join(HERE, 'hooks', 'spu')
+    hooked = {os.path.splitext(os.path.basename(x))[0] for x in glob.glob(os.path.join(hk, '*.json'))}
+    for n in sorted(hooked - set(mods)):
+        print('[spu] hooks/spu/%s.json: no such module in this game (skipped)' % n, flush=True)
+
+    def hook(stage, n, f):
+        if n not in hooked: return
+        r = subprocess.run([sys.executable, os.path.join(HERE, 'spu_hooks.py'), 'apply', stage, f,
+                            os.path.join(hk, n + '.json')], capture_output=True, text=True, cwd=HERE)
+        if r.returncode:
+            raise SystemExit('SPU hooks %s (%s) do not apply:\n%s' % (n, stage, (r.stdout + r.stderr)[-2000:]))
+
     def post(n):
         x = os.path.join(out, n); fix_includes(x)
         f = os.path.join(x, 'spu_recomp.c')
+        hook('pre', n, f)
         for cmd in ([os.path.join(HERE, 'spu_regcache.py'), f, f], [os.path.join(HERE, 'spu_directhop.py'), f]):
             subprocess.run([sys.executable] + cmd, check=True, capture_output=True)
         if n.startswith(('jobmod_', 'wwspic_')):
             for t in ('spu_writeback.py', 'spu_group_entry.py', 'spu_loop_ib.py'):
                 subprocess.run([sys.executable, os.path.join(HERE, t), f, f], check=True, capture_output=True)
+        hook('post', n, f)
+        subprocess.run([sys.executable, os.path.join(HERE, 'spu_w0.py'), f], check=True, capture_output=True)
         shutil.copytree(x, os.path.join(spudir, n))
     with ThreadPoolExecutor(os.cpu_count() or 4) as ex:
         list(ex.map(post, mods))
@@ -329,14 +354,17 @@ def main():
     ap.add_argument('--port', default=os.path.dirname(HERE)); ap.add_argument('--work', default=None)
     ap.add_argument('--only', choices=['ppu', 'spu'], default=None)
     ap.add_argument('--chunks', type=int, default=28)
+    ap.add_argument('--spu-dir', default=None, help='write the SPU modules here instead of project/spu (tests)')
+    ap.add_argument('--reglocals', type=int, choices=[0, 1, 2, 3], default=0,
+                    help='experimental guest-registers-in-locals pass (scratch/cpu_reglocals.md); 0 = off')
     a = ap.parse_args()
     port = os.path.abspath(a.port); tk = os.path.join(port, 'ps3recomp', 'tools')
     work = os.path.abspath(a.work or os.path.join(port, 'build_regen'))
     os.makedirs(work, exist_ok=True)
     if a.only in (None, 'ppu'):
-        ppu(port, tk, a.eboot, 'recompiled', 'r3', a.chunks, True, os.path.join(HERE, 'hooks', 'r3.json'), work)
+        ppu(port, tk, a.eboot, 'recompiled', 'r3', a.chunks, True, os.path.join(HERE, 'hooks', 'r3.json'), work, reglocals=a.reglocals)
     if a.only in (None, 'spu'):
-        spu(port, tk, os.path.abspath(a.eboot), work)
+        spu(port, tk, os.path.abspath(a.eboot), work, a.spu_dir and os.path.abspath(a.spu_dir))
     print('done: game code regenerated.')
 
 

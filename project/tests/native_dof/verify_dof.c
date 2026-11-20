@@ -30,7 +30,7 @@ typedef struct { uint32_t img; long n, pass, fail, skip; double us; } stat_t;
 
 int main(int argc, char** argv)
 {
-    const char* dir = argc > 1 ? argv[1] : "D:\\Games\\Resistance3Port\\scratch\\dof_capture";
+    const char* dir = argc > 1 ? argv[1] : "scratch\\dof_capture";
     const int reps = argc > 2 ? atoi(argv[2]) : 1;
     /* the SPU threads' MXCSR: FTZ | DAZ | round toward zero, exceptions masked */
     _mm_setcsr((_mm_getcsr() & ~0x6000u) | 0x8040u | (getenv("VERIFY_RN") ? 0u : 0x6000u));

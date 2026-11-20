@@ -8294,6 +8294,18 @@ static u32 sink_bind_textures(const u32* target_slots, u32 n_targets,
         if (!rsx_texture_legacy() && !((s_eng_hw_snorm_units >> u) & 1u) &&
             rsx_fp_texture_sext_mask(t.format, t.remap, t.filter))
             samplers[u].min_linear = samplers[u].mag_linear = samplers[u].mip_linear = 0;
+        /* RSX_ANISO forced onto a point-sampled (min and mag nearest) colour lookup filters it anyway (D3D12
+         * ANISOTROPIC ignores the point filters, NVIDIA Vulkan too): packed depth copies, LUTs and the game's
+         * point-sampled screen copies get blended (shimmer, wrong depth tests). Those keep the game's own level;
+         * depth formats (shadow maps) are unchanged. RSX_ANISO_POINT=1: force it everywhere (old). */
+        if (!samplers[u].min_linear && !samplers[u].mag_linear && ((t.format & 0x9Fu) < 0x90u || (t.format & 0x9Fu) > 0x93u)) {
+            static int force_point = -1;
+            if (force_point < 0) { const char* e = getenv("RSX_ANISO_POINT"); force_point = (e && atoi(e)) ? 1 : 0; }
+            if (!force_point) {
+                static const u8 levels[8] = { 1, 2, 4, 6, 8, 10, 12, 16 };
+                samplers[u].max_aniso = levels[(t.control0 >> 4) & 7u];
+            }
+        }
         samplers[u].border_color = eng_border_color(
             t.border_color, t.wrap, t.dimension, t.filter >> 28,
             !((s_eng_hw_snorm_units >> u) & 1u) &&

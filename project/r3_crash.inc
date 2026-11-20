@@ -16,9 +16,12 @@
  * Included after vm_commit_veh: the guest arena (vm_base) is known. */
 #ifdef _WIN32
 #include "port_crash.h"
+#define PORT_FRAMETIME_IMPL   /* frame-time recorder: logs\frametimes_*.txt, marker key */
+#include "port_frametime.h"
 
 extern "C" volatile LONG r2_game_frames = 0;   /* stubs.cpp frame limiter */
 extern "C" volatile int g_r2pc_paused;         /* r3_pcport.cpp: focus pause / quit prompt */
+extern "C" volatile long g_port_pause_gen;     /* bumped on every pause / resume (stubs.cpp default 0) */
 extern "C" uint32_t ppu_prof_resolve_host(void* ra);   /* ppu_loader.cpp: host pc -> lifted function */
 extern "C" int r2rsx_enabled(void);
 extern "C" uint64_t r2rsx_last_flip_time(void);
@@ -27,6 +30,17 @@ extern "C" void rsx_null_refresh_restore_on_crash(void);   /* rsx_null_backend.c
 static uint64_t r3_crash_frames(void) { return (uint64_t)(ULONG)r2_game_frames; }
 static uint64_t r3_crash_rsx(void) { return r2rsx_enabled() ? r2rsx_last_flip_time() : 0; }
 static int r3_crash_paused(void) { return g_r2pc_paused != 0; }
+
+/* Guest state of the faulting thread and a per-guest-thread wait table (syscall in flight,
+ * its r3 = wait object / address, how long; last syscall callsite) in every crash and hang
+ * report. Mirrors R1 (scratch\crash_report_integration.md); PORT_CRASH_EXTRA=0 = old report. */
+extern "C" int ppu_crash_guest_state(uint64_t*, uint32_t*, uint32_t*, uint32_t*, uint32_t*, uint32_t*);
+extern "C" size_t ppu_crash_guest_threads(char* buf, size_t cap);   /* ppu_loader.cpp */
+static void r3_crash_guest(PortGuestState* g)
+{
+    g->valid = ppu_crash_guest_state(&g->thread_id, &g->lr, &g->sp, &g->syscall_inflight,
+                                     &g->syscall_last, &g->callsite);
+}
 
 static void r2_crash_init(void)
 {
@@ -42,7 +56,15 @@ static void r2_crash_init(void)
     c.vm_size = VM_SIZE;
     c.guest_resolve = ppu_prof_resolve_host;
     c.before_report = rsx_null_refresh_restore_on_crash;
+    c.guest_state = r3_crash_guest;
+    c.guest_threads = ppu_crash_guest_threads;
+    c.after_report = port_ft_on_report;
     port_crash::init(c);
+    PortFtConfig f = {};
+    f.title = c.title;
+    f.paused = r3_crash_paused;
+    f.pause_gen = [](void) -> long { return g_port_pause_gen; };
+    port_ft_init(f);
 }
 #else
 extern "C" volatile LONG r2_game_frames = 0;

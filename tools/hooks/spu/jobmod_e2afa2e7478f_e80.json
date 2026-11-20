@@ -1,0 +1,26 @@
+{
+"pre": {},
+"post": {
+"jobmod_e2afa2e7478f_e80_spu_func_0000D9F8": [
+{
+"at": 1,
+"ctx": "void jobmod_e2afa2e7478f_e80_spu_func_0000D9F8(spu_context* ctx) {",
+"rm": [],
+"add": [
+"        { extern int r3na_gate(spu_context*, int, void (*)(spu_context*)); if (r3na_gate(ctx, 5, jobmod_e2afa2e7478f_e80_spu_func_0000D9F8)) SPU_RET(ctx); }  /* R3_NATIVE_AUDIO hook */"
+]
+}
+],
+"jobmod_e2afa2e7478f_e80_spu_func_0000DB50": [
+{
+"at": 1,
+"ctx": "void jobmod_e2afa2e7478f_e80_spu_func_0000DB50(spu_context* ctx) {",
+"rm": [],
+"add": [
+"        { extern int r3na_gate(spu_context*, int, void (*)(spu_context*)); if (r3na_gate(ctx, 6, jobmod_e2afa2e7478f_e80_spu_func_0000DB50)) SPU_RET(ctx); }  /* R3_NATIVE_AUDIO hook */"
+]
+}
+]
+},
+"preamble": []
+}

@@ -15,6 +15,7 @@
 #include "../../runtime/ppu/ppu_memory.h"   /* vm_write32 (translate + byte-swap, OOB-safe) */
 #include "../../runtime/memory/vm.h"    /* VM_HLE_INJECT_BASE */
 #include "../../runtime/spu/spu_coherency.h" /* the blit row copy's reservation bookkeeping */
+#include "../../runtime/spu/spu_put_order.h" /* GCM_PUT_ORDER: g_gcm_ea_io_tab */
 #include "rsx_commands.h"                    /* rsx_state, rsx_process_command_buffer */
 #include "../../include/ps3emu/guest_call.h" /* g_ps3_guest_caller for direct handler dispatch */
 #include "../../include/ps3emu/ps3_ftrace.h"  /* PS3_FTRACE timeline */
@@ -38,6 +39,7 @@ char* rsx_getenv(const char* name);
 #else
 #include <time.h>
 #endif
+#include "../../runtime/platform/port_hires_sleep.h"   /* port_sleep_1ms (perf final pass) */
 
 /* ---------------------------------------------------------------------------
  * Timestamp helpers (same pattern as sys_timer)
@@ -534,6 +536,11 @@ static void gcm_init_report_memory(void)
 }
 
 /* NID: 0xB2E761D4 */
+/* EA of IO offset 0 as given to cellGcmInit: guest buffers placed at fixed IO offsets (R3's aim DOF
+ * light buffer at IO 0x30000) are found from it, since the base follows the mapper (0x30000000 or
+ * 0x40000000). Default = the base the game gets with PS3_MAPPER_BASE=30000000. */
+u32 g_gcm_io_base = 0x30000000u;
+
 s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
 {
     printf("[cellGcmSys] Init(cmdSize=0x%X, ioSize=0x%X, ioAddr=0x%08X)\n",
@@ -564,6 +571,7 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
     s_config.localAddress    = 0xC0000000;  /* typical RSX local mem base */
     s_config.localSize       = 256 * 1024 * 1024;  /* 256 MB */
     s_config.ioAddress       = ioAddress;
+    if (ioAddress) g_gcm_io_base = ioAddress;
     s_config.ioSize          = ioSize;
     s_config.memoryFrequency = 650000000;   /* 650 MHz */
     s_config.coreFrequency   = 500000000;   /* 500 MHz */
@@ -622,6 +630,9 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
       void gcm_forget_spu_blocks(void);
       gcm_forget_spu_blocks();
       g_spu_put_hook = gcm_note_spu_put; }
+    /* GCM_PUT_ORDER (runtime/spu/spu_put_order.h): SPU PUTs over a park at
+     * their head write it last; they find the park through this table. */
+    g_gcm_ea_io_tab = s_io_address_table;
 
     if (r2rsx_enabled()) {
         if (r2rsx_context_allocate(GCM_CONTROL_GUEST_ADDR - 0x40u, R2RSX_LABEL_EA,
@@ -1096,6 +1107,16 @@ static int s_park_pass = 0;           /* this drain stopped on a self-JUMP park 
 /* How long a self-JUMP park may stand with `put` somewhere else before the
  * drain gives up on it being patched and follows `put` instead. */
 #define GCM_PARK_GRACE_MS 50ull
+/* GCM_PARK_WAIT_MS=<ms> overrides it (GoW-Ascension-Recomp, MIT: a title whose
+ * SPU jobs patch the park after moving put needs far longer once recompiled;
+ * following put early skips the frame and the label it releases). Unset = 50. */
+static unsigned long long gcm_park_grace_ms(void)
+{
+    static unsigned long long ms = ~0ull;
+    if (ms == ~0ull) { const char* e = getenv("GCM_PARK_WAIT_MS");
+                       ms = e ? strtoull(e, NULL, 0) : GCM_PARK_GRACE_MS; }
+    return ms;
+}
 /* How close `current` must get to `end` before the runtime will recycle a ring
  * on the title's behalf. One gcmReserve is 8 bytes; a page of slack keeps a
  * title that is merely near the end from being touched. */
@@ -3228,6 +3249,8 @@ static void gcm_zc_init(void)
     s_zc.queries  = gcm_zc_env("PS3RECOMP_ZCULL_QUERIES", 1) != 0;
     s_zc.precise  = gcm_zc_env("PS3RECOMP_ZCULL_PRECISE", 1) != 0;
     s_zc.relaxed  = gcm_zc_env("PS3RECOMP_ZCULL_RELAXED", 0) != 0;
+    /* R3_ZCULL_APPROX=1: RPCS3 "Approximate" (any hit -> 0xFFFF, strict sync); only ever reports more visible. */
+    if (gcm_zc_env("R3_ZCULL_APPROX", 0) == 1) { s_zc.precise = 0; s_zc.relaxed = 0; }
     s_zc.cond     = gcm_zc_env("PS3RECOMP_COND_RENDER", 1) != 0;
     s_zc.zcull_en = 1;           /* NV4097_SET_ZCULL_EN resets to 3 */
     s_zc.cur      = -1;
@@ -3691,6 +3714,22 @@ static int gcm_zc_alloc(void)
     return i;
 }
 
+/* R3_ZCULL_EXHAUST_VISIBLE (default 1; 0 = old): when no host query can count a
+ * draw (pool exhausted after the forced recycle, or the write queue full), the
+ * draw used to be lost and the report could read 0 = occluded. Instead the
+ * current statistics period is marked visible (0xFFFF, the null provider's
+ * value; Xenia-style "unknown = visible"). Only on exhaustion; it can only make
+ * a report larger, never hide an object. */
+static void gcm_zc_lost_draw(const char* why)
+{
+    static int on = -1;
+    if (on < 0) { const char* e = getenv("R3_ZCULL_EXHAUST_VISIBLE"); on = !(e && *e == '0'); }
+    if (!on) return;
+    if (s_zc.stat[s_zc.stat_tag].result < 0xFFFFu) s_zc.stat[s_zc.stat_tag].result += 0xFFFFu;
+    static int n = 0;
+    if (PS3_LOG_FIRST(n, 8)) printf("[zcull] %s: report forced visible (R3_ZCULL_EXHAUST_VISIBLE)%c", why, 10);
+}
+
 /* A query that ended with draws waits in the queue for a report to claim it. */
 static void gcm_zc_enqueue_current(void)
 {
@@ -3702,7 +3741,10 @@ static void gcm_zc_enqueue_current(void)
     s_zc.q[i].ts_us = gcm_zc_now_us();
     gcm_zc_write* w = gcm_zc_push();
     if (w) w->q = i;
-    else { gcm_zc_q_discard(i); gcm_zc_q_free(i); }
+    else {
+        if (s_zc.q[i].draws) gcm_zc_lost_draw("report queue full, query dropped");
+        gcm_zc_q_discard(i); gcm_zc_q_free(i);
+    }
 }
 
 static void gcm_zc_set_active(int state)
@@ -3829,10 +3871,10 @@ static void gcm_zc_read_report(u32 sink, u32 type)
 }
 
 /* ZCULL_control::clear. */
-static void gcm_zc_clear(u32 type)
+static void gcm_zc_clear(u32 type, int discard_active)
 {
     if (!(type & 1u)) return;
-    if (s_zc.cur >= 0 && s_zc.q[s_zc.cur].active) {
+    if (discard_active && s_zc.cur >= 0 && s_zc.q[s_zc.cur].active) {
         gcm_zc_q_end(s_zc.cur);
         gcm_zc_q_discard(s_zc.cur);
         gcm_zc_q_free(s_zc.cur);
@@ -3854,6 +3896,8 @@ static void gcm_zc_on_draw(void)
     if (s_zc.cur >= 0) {
         s_zc.q[s_zc.cur].draws++;
         s_zc.q[s_zc.cur].sync_tag = ++s_zc.timer;
+    } else if (s_zc.host_active) {
+        gcm_zc_lost_draw("query pool exhausted, draw not counted");
     }
 }
 
@@ -4016,7 +4060,18 @@ static void gcm_zc_hle_read(void)
  * queue forever (RPCS3's Diablo III / Yakuza 5 workaround). */
 static void gcm_zc_on_flip(void)
 {
-    if (s_zc.inited && s_zc.on && s_zc.wn) gcm_zc_clear(1u | 2u);
+    /* RPCS3 #18148: discarding the running query at the flip makes the next
+     * report count only post-flip draws -> objects missing. R3_ZCULL_FLIP_CLEAR=keep
+     * (or 2; opt-in): drain the unclaimed writes, the running query keeps counting
+     * (a report can only grow). Default (unset / anything else) = upstream discard,
+     * which keeps the query pool from being exhausted by never-consumed queries. */
+    static int keep = -1;
+    if (keep < 0) {
+        const char* e = getenv("RSX_ZCULL_FLIP_CLEAR");   /* shared name; R3_ZCULL_FLIP_CLEAR = alias */
+        if (!e || !*e) e = getenv("R3_ZCULL_FLIP_CLEAR");
+        keep = (e && (*e == 'k' || *e == 'K' || *e == '2')) ? 1 : 0;
+    }
+    if (s_zc.inited && s_zc.on && s_zc.wn) gcm_zc_clear(1u | 2u, !keep);
 }
 
 static int gcm_flip_reset_enabled(void)
@@ -4078,7 +4133,7 @@ static void gcm_method_post(u32 m, u32 v_in)
     if (m == 0x1A8) s_report_dma = v_in;
     if (s_zc.on) {
         switch (m) {
-        case 0x17C8u: gcm_zc_clear(v_in); return;
+        case 0x17C8u: gcm_zc_clear(v_in, 1); return;
         case 0x17CCu: s_zc.zpass_en = v_in != 0; gcm_zc_check_state(); return;
         case 0x1804u: s_zc.stats_en = v_in != 0; gcm_zc_check_state(); return;
         case 0x1D84u: {
@@ -4429,7 +4484,7 @@ static void gcm_rsx_process_fifo_unlocked(void)
                       const unsigned long long now = ps3_ms_now();
                       if (park_off != s_fifo_getoff || park_put != put) {
                           park_off = s_fifo_getoff; park_put = put; park_since = now;
-                      } else if (now - park_since >= GCM_PARK_GRACE_MS) {
+                      } else if (now - park_since >= gcm_park_grace_ms()) {
                           park_off = 0;
                           gcm_fifo_dump_around(s_fifo_getoff);
                           gcm_fifo_resync_why("jump-park", &s_fifo_getoff, put);
@@ -5236,7 +5291,7 @@ void cellGcm_fifo_recycle_count(u32 ctx_ea, u32 count)
     s_fifo_recycle_waiting = 1;
     while (io_begin != 0xFFFFFFFFu && s_fifo_back_jumps == back_jumps0 &&
            idle < 2000 && spins < 60000) {
-        Sleep(1); spins++;
+        port_sleep_1ms(); spins++;   /* hi-res 1 ms nap; PORT_HIRES_SLEEP=0: Sleep(1) */
         if (s_fifo_getoff != last_get) { last_get = s_fifo_getoff; idle = 0; }
         else idle++;
         if (s_recdbg && spins % 1000 == 0)
@@ -6668,6 +6723,24 @@ u32 cellGcmGetVBlankCount(void)
     if (s_r2rsx) return (u32)r2rsx_vblank_count();
     /* Approximate: increment each time queried (games use this for timing) */
     return s_vblank_count++;
+}
+
+/* Port: the bound tile region of location `loc` (0 local, 1 main/IO as in
+ * cellGcmSetTile) holding offset `off`; used by the R3 "PC fast" aim blur to
+ * tile its output like the RSX (R3: main-memory tile 4 at IO offset 0x30000).
+ * 1 = found. */
+int cellGcm_port_tile_at(u32 loc, u32 off, u32* offset, u32* pitch, u32* bank, u32* comp)
+{
+    for (u32 i = 0; i < CELL_GCM_MAX_TILE_COUNT; i++) {
+        const CellGcmTileInfo* t = &s_tiles[i];
+        if (!t->bound || (t->tile & 1u) != (loc & 1u) || off < t->offset || off - t->offset >= t->size) continue;
+        if (offset) *offset = t->offset;
+        if (pitch) *pitch = t->pitch;
+        if (bank) *bank = t->bank;
+        if (comp) *comp = t->format;
+        return 1;
+    }
+    return 0;
 }
 
 /* RPCS3 cellGcmGetTileInfo / cellGcmGetZcullInfo take no argument and return

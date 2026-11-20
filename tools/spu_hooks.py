@@ -36,7 +36,9 @@ def split(lines):
     return pre, funcs
 
 def extract(curp, rawp, postp, outp):
-    pc, C = split(rd(curp)); pr, R = split(rd(rawp)); pp, P = split(rd(postp))
+    # cur went through spu_w0.py; compare in the plain form the hunks apply to
+    unw0 = lambda l: re.sub(r'\bSPU_([WH])0\(S_(\d+)\)', lambda m: 'S_%s._u%s[0]' % (m.group(2), '32' if m.group(1) == 'W' else '16'), l)
+    pc, C = split([unw0(l) for l in rd(curp)]); pr, R = split(rd(rawp)); pp, P = split(rd(postp))
     res = {'pre': {}, 'post': {}, 'preamble': hunks(pp, pc)}
     for n, b in C.items():
         if n not in P: raise SystemExit('%s: %s not in fresh lift' % (curp, n))
@@ -64,11 +66,12 @@ def apply(stage, fp, hp):
             # keep the trailing #define/#undef/blank lines outside the edited body
             t = e
             while t > k + 1 and TAIL.match(L[t - 1]): t -= 1
+            was_cached = any('u128 S_' in l for l in L[k:t])
             body = apply_hunks(L[k:t], todo.pop(m.group(1)), m.group(1))
-            # a hook that brings in a register-cached body also needs the
-            # _SRC_RL macro spu_regcache.py writes around such bodies
+            # a hook that brings a register-cached body into an uncached one also
+            # needs the _SRC_RL macro spu_regcache.py writes around such bodies
             regs = re.findall(r'^\s*u128 S_(\d+) = ctx->gpr\[\d+\];$', '\n'.join(body), re.M)
-            if regs and not (k > 0 and L[k - 1].startswith('#define _SRC_RL')):
+            if regs and not was_cached and not (k > 0 and L[k - 1].startswith('#define _SRC_RL')):
                 rl = ' '.join('S_%s = ctx->gpr[%s];' % (r, r) for r in regs)
                 body = ['#define _SRC_RL do { %s } while (0)' % rl] + body
                 if not (t < len(L) and L[t].startswith('#undef _SRC_RL')):

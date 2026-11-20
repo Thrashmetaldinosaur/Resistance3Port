@@ -117,7 +117,7 @@
     {
       "id": "fps",
       "label": "Frame rate",
-      "help": "The PS3 game runs at 30. 60 doubles how often it updates and draws without playing faster; it needs about twice the CPU and GPU time.",
+      "help": "The PS3 game runs at 30. 60 doubles how often it updates and draws without playing faster; it needs about twice the CPU and GPU time. Above about 75 the left stick can stop moving the player until you jump, so 60 is recommended.",
       "choices": [
         {
           "label": "30 (PS3 original)",
@@ -389,9 +389,81 @@
       }
     },
     {
+      "id": "dof",
+      "label": "Depth of field",
+      "help": "The background / foreground blur in cutscenes, while aiming and in some areas. Also in game: F10 > More PC Options.",
+      "choices": [
+        {
+          "label": "On (game default)",
+          "set": {
+            "fx_dof": ""
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "fx_dof": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "fx_dof": ""
+      }
+    },
+    {
+      "id": "ads_blur",
+      "label": "Aim-down-sights blur",
+      "help": "The blur around the sights while aiming. Off keeps the view sharp and skips its CPU work, so aiming runs as fast as normal play. Also in game: F10 > PC Options.",
+      "choices": [
+        {
+          "label": "On (game default)",
+          "set": {
+            "fx_ads_blur": ""
+          }
+        },
+        {
+          "label": "Off",
+          "set": {
+            "fx_ads_blur": "0"
+          }
+        }
+      ],
+      "defaults": {
+        "fx_ads_blur": ""
+      }
+    },
+    {
+      "id": "ads_approx",
+      "label": "Aim blur",
+      "help": "How the aim-down-sights blur is made. PC fast replaces the PS3 blur job with a quicker PC approximation (close, not pixel-identical; it checks itself against the PS3 blur first and switches back if they differ). Applies on next start. Also in game: F10 > PC Options.",
+      "choices": [
+        {
+          "label": "Default",
+          "set": {
+            "fx_ads_approx": ""
+          }
+        },
+        {
+          "label": "PS3 exact",
+          "set": {
+            "fx_ads_approx": "0"
+          }
+        },
+        {
+          "label": "PC fast",
+          "set": {
+            "fx_ads_approx": "1"
+          }
+        }
+      ],
+      "defaults": {
+        "fx_ads_approx": ""
+      }
+    },
+    {
       "id": "renderer",
       "label": "Renderer",
-      "help": "Compatible (RPCS3) is the most tested. Native Vulkan is faster on weaker PCs but experimental.",
+      "help": "Use Compatible (RPCS3). Direct3D 12 is NOT WORKING YET: an early work-in-progress renderer with many graphics bugs and much lower performance, for testing only (no upscaling or frame generation); without Direct3D 12 the game uses Compatible.",
       "choices": [
         {
           "label": "Compatible",
@@ -400,9 +472,9 @@
           }
         },
         {
-          "label": "Native Vulkan (experimental)",
+          "label": "Direct3D 12 (not working yet - testing only)",
           "set": {
-            "renderer": "vulkan"
+            "renderer": "d3d12"
           }
         }
       ],

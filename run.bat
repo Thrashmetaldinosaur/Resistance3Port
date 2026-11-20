@@ -8,6 +8,7 @@ set "CFG_USER=%USERPROFILE%\Saved Games\Resistance 3\config"
 set "CFG_FILES=settings.ini settings.bat controls.txt mouselook.cfg"
 if not exist portable.txt if exist "%CFG_USER%" robocopy "%CFG_USER%" . %CFG_FILES% /XO /XN /XC /R:0 /W:0 /NJH /NJS /NFL /NDL /NP >nul
 if not exist build\Resistance3.exe (echo The game is not built yet - run Setup.bat first. & pause & exit /b 1)
+if not exist game\EBOOT.elf (echo The game program game\EBOOT.elf is missing - run Setup.bat again to decrypt it from your copy. & pause & exit /b 1)
 rem ---- settings the port needs (Launcher.exe's choices come after, from settings.bat) ----
 set "SPURS_PM_YIELD=0"
 set "SPURS_IDLE_POLL=0"
@@ -35,8 +36,10 @@ if exist "%SHC_BACKUP%" robocopy "%SHC_BACKUP%" shadercache /E /XO /XN /XC /R:0 
 echo Running... (log: %~dp0logs\run.log). Close the game window to stop.
 rem which build: PORT_GAME_EXE (e.g. build_cpu\Resistance3.exe) wins; on a CPU without AVX2 (the launcher
 rem sets PORT_CPU_V3=0) the build_baseline one when it has been built (build_cpu.bat baseline)
-if not defined PORT_GAME_EXE set "PORT_GAME_EXE=build\Resistance3.exe"
-if "%PORT_CPU_V3%"=="0" if exist build_baseline\Resistance3.exe set "PORT_GAME_EXE=build_baseline\Resistance3.exe"
+if not defined PORT_GAME_EXE (
+  set "PORT_GAME_EXE=build\Resistance3.exe"
+  if "%PORT_CPU_V3%"=="0" if exist build_baseline\Resistance3.exe set "PORT_GAME_EXE=build_baseline\Resistance3.exe"
+)
 rem output goes to logs\run.log only (Launcher.exe starts this file hidden, so there is no console window)
 "%PORT_GAME_EXE%" "%~dp0game\EBOOT.elf" > logs\run.log 2>&1
 rem the game can hand over to a new process (level loads, freeze restart): wait until none is left

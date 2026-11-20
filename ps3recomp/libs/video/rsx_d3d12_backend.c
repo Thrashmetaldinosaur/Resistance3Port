@@ -2714,7 +2714,7 @@ static u32 gf_elem_size(u32 type, u32 n)
 
 typedef struct { int space; u64 s, e; } GFRange;
 
-/* Decode `count` guest indices at `first` into ib[]; range into *plo/*phi
+/* Decode `count` guest indices at `first` into ib[]; range into *plo and *phi
  * (merged with what they hold). 0 = a primitive-restart index was hit. */
 static int gf_decode(const rsx_state* st, u32 first, u32 count, u32* ib, u32* plo, u32* phi)
 {

@@ -88,6 +88,21 @@ uint8_t* vm_sudo_base = nullptr;
 /* RSX page-protection fault handler: guest address, 1 = write. Returns 1 if handled. */
 int (*g_vm_access_violation_hook)(uint32_t guest_addr, int is_write) = nullptr;
 extern "C" void spu_jobtime_av(long long qpc_ticks);   /* spu_drain.c */
+extern "C" int spu_jobtime_cur_img(void);              /* spu_drain.c: [av-who] */
+extern "C" int spu_sched_effective(void);              /* spu_channels.c: PORT_SPU_SCHED, [native] line */
+#ifdef R3_SPU_NATIVE_BUILT   /* CMake: the lifted SPU code and the native job modules are in this build */
+extern "C" const char* r3nj_kernel_why_off(int k);   /* r3_native_jobs.c: [native] line */
+extern "C" uint32_t r3nj_effective_mask(void);       /* r3_native_jobs.c */
+extern "C" uint32_t r3na_hooks_present(void);        /* r3_native_audio.c */
+extern "C" uint32_t r3na_effective_mask(void);       /* r3_native_audio.c */
+extern "C" int r3_native_dof_job_level(void);        /* r3_native_dof.c */
+#else   /* no lifted SPU code (PORT_ENABLE_SPU=OFF, configured before the regen): nothing native can run */
+static const char* r3nj_kernel_why_off(int) { return "no lifted SPU code"; }
+static uint32_t r3nj_effective_mask(void) { return 0; }
+static uint32_t r3na_hooks_present(void) { return 0; }
+static uint32_t r3na_effective_mask(void) { return 0; }
+extern "C" int r3_native_dof_job_level(void) { return 0; }   /* r3_native_dof.c is not built either */
+#endif
 /* Unclaimed protection fault on a guarded page: the RSX page-guard registry
  * re-applies (or drops) the page's protection itself (rsx_page_guard_reconcile;
  * set by the engine). Returns 1 when the access can be retried. */
@@ -114,10 +129,12 @@ double   r2_display_refresh_hz(void);
 void     r3_patches_apply(void);              /* r3_patches.cpp */
 void     cellGcm_rsx_process_fifo(void);      /* drain get -> put */
 unsigned cellGcm_flip_request_count(void);
+extern "C" volatile int g_r2pc_paused;   /* the port's pause (PC menu, quit prompt, pad loss): osd_repost */
 }
 
 /* CPU detection, PORT_CPU_PROFILE and thread placement (runs first in main). */
 #include "cpu_profile.inc"
+extern "C" int ps3_host_core_scarce(void);   /* sys_ppu_thread.c, PORT_CORE_SCARCE */
 #include "r2_autoconfig.h"
 
 /* ---------------------------------------------------------------------------
@@ -212,6 +229,7 @@ static int s_rsx_vk = 0;
 
 #if defined(PS3RECOMP_RSX_VULKAN)
 #include "../ps3recomp/libs/video/rsx_vulkan_backend.h"
+#include "../ps3recomp/libs/video/rsx_featcov.h"   /* rsx_featcov_dump at exit */
 extern "C" int r3_native_aa_register(void);   /* r3_native_aa.cpp: RSX_FSR=2 DLAA, 3 FSR 3.1, 1 FSR1 */
 /* R2_RSX=vulkan (or native): ps3recomp's register-file draw engine driving
  * the Vulkan backend, presenting into the null backend's window. */
@@ -220,35 +238,31 @@ static int rsx_vk_wanted(void)
     const char* e = getenv("R2_RSX");
     return e && (!_stricmp(e, "vulkan") || !_stricmp(e, "native"));
 }
+#endif
 
-/* "Handle RSX Memory Tiling" from the rpcs3_config.yml the RPCS3 path uses
- * (R2_RSX_CONFIG, else next to the exe or in its parent). R3 ships it on and
- * its main-memory render targets are tiled; missing file/key = on. */
+#include "../ps3recomp/libs/video/rsx_d3d12_engine.h"
+extern "C" int r3_native_aa_register_d3d12(void);   /* r3_native_aa.cpp: RSX_FSR 1 FSR1, 2 DLAA, 3 FSR 3.1, 4 XeSS */
+/* R2_RSX=d3d12: "Direct3D 12 (experimental)" -- the same register-file draw engine
+ * driving the D3D12 backend (rsx_d3d12_engine.c), presenting into the null
+ * backend's window. */ int s_rsx_d3e = 0; int rsx_d3e_wanted(void)
+{
+    const char* e = getenv("R2_RSX");
+    return e && !_stricmp(e, "d3d12");
+}
+
+/* "Handle RSX Memory Tiling" for the native GCM path, the same rule as the RPCS3
+ * bridge (r2rsx_bridge.cpp, R2 parity): RSX_TILING (alias R2_RSX_TILING) when
+ * set, else on -- R3's main-memory render targets are tiled, and a user-edited
+ * rpcs3_config.yml (kept by tools/update.ps1) may still have it off. */
+#include "port_native_summary.h" /* port_native_parse_bool (pragma once; included again below) */
+#include <initializer_list>
 static int r3_yml_tiling(void)
 {
-    char dir[MAX_PATH] = "";
-    GetModuleFileNameA(NULL, dir, sizeof dir);
-    if (char* s = strrchr(dir, '\\')) *s = 0;
-    char paths[3][MAX_PATH + 32] = {};
-    if (const char* e = getenv("R2_RSX_CONFIG"); e && *e) snprintf(paths[0], sizeof paths[0], "%s", e);
-    snprintf(paths[1], sizeof paths[1], "%s\\rpcs3_config.yml", dir);
-    snprintf(paths[2], sizeof paths[2], "%s\\..\\rpcs3_config.yml", dir);
-    for (auto& p : paths) {
-        if (!p[0]) continue;
-        FILE* f = fopen(p, "r");
-        if (!f) continue;
-        char line[512];
-        int v = 1;
-        while (fgets(line, sizeof line, f)) {
-            const char* k = strstr(line, "Handle RSX Memory Tiling:");
-            if (!k) continue;
-            k += strlen("Handle RSX Memory Tiling:");
-            while (*k == ' ' || *k == '\t') k++;
-            v = _strnicmp(k, "false", 5) != 0;
-            break;
-        }
-        fclose(f);
-        return v;
+    for (const char* n : { "RSX_TILING", "R2_RSX_TILING" }) {
+        const char* e = getenv(n);
+        if (!e || !*e) continue;
+        const int b = port_native_parse_bool(e, -1);
+        if (b >= 0) return b;
     }
     return 1;
 }
@@ -265,7 +279,6 @@ static void r3_native_env_defaults(void)
      * shimmer at MSAA edges without it). */
     if (!getenv("RSX_FP_CENTROID")) _putenv("RSX_FP_CENTROID=1");
 }
-#endif
 
 /* location 0 = RSX local memory, 1 = main memory through the IO table. */
 static const uint8_t* rsx_live_guest_ptr(void*, uint32_t location,
@@ -302,6 +315,29 @@ static int rsx_select_init(uint32_t w, uint32_t h, const char* title)
         fprintf(stderr, "[rsx] native Vulkan init FAILED -- falling back to the D3D12 backend\n");
     }
 #endif
+    if (rsx_d3e_wanted()) {
+        if (!getenv("PS3RECOMP_RSX_ENGINE")) _putenv("PS3RECOMP_RSX_ENGINE=dispatch");
+        r3_native_env_defaults();
+        if (rsx_null_backend_init(w, h, title) == 0) {
+            rsx_d3d12_engine_set_window(rsx_null_backend_get_hwnd());
+            r3_native_aa_register_d3d12();
+            if (rsx_d3d12_engine_init(w, h, title) == 0) {
+                s_rsx_d3e = 1;
+                rsx_null_backend_suppress_present(1);
+                fprintf(stderr, "[rsx] Direct3D 12 (experimental) renderer up\n");
+                return 0;
+            }
+        }
+        /* main() probed the device already (r3_renderer_migrate), so this is rare. The RPCS3 renderer
+         * can't be started this late (its FIFO owner is chosen at the first GCM call), so the game
+         * restarts itself with it; never the legacy backend. */
+        fprintf(stderr, "[rsx] Direct3D 12 (experimental) init FAILED -- restarting with the Compatible (RPCS3) renderer\n");
+        fflush(stderr);
+        if (rsx_d3d12_engine_relaunch_compatible()) ExitProcess(0);
+        MessageBoxA(nullptr, "Direct3D 12 (experimental) could not start on this system.\n\n"
+                             "Choose the Compatible renderer in the launcher.", "Renderer error", MB_ICONERROR);
+        ExitProcess(1);
+    }
     if (rsx_live_draw_enabled()) {
         if (rsx_null_backend_init(w, h, title) == 0 &&
             rsx_live_draw_init(rsx_null_backend_get_hwnd(), w, h, rsx_live_guest_ptr, nullptr) == 0) {
@@ -319,12 +355,13 @@ static void rsx_select_present(void)
 #if defined(PS3RECOMP_RSX_VULKAN)
     if (s_rsx_vk) { rsx_vulkan_backend_present(); return; }
 #endif
+    if (s_rsx_d3e) { rsx_d3d12_engine_present(); return; }
     if (s_rsx_live) rsx_live_draw_present(cellGcmGetCurrentDisplayBufferId());
     else rsx_backend_present();
 }
 static int rsx_select_pump(void)
 {
-    return (s_rsx_live || s_rsx_vk) ? rsx_null_backend_pump_messages() : rsx_backend_pump();
+    return (s_rsx_live || s_rsx_vk || s_rsx_d3e) ? rsx_null_backend_pump_messages() : rsx_backend_pump();
 }
 #  undef  rsx_backend_init
 #  undef  rsx_backend_present
@@ -386,6 +423,8 @@ static long long fc_us(void)
     return (long long)((double)c.QuadPart * 1e6 / (double)f.QuadPart);
 }
 
+extern "C" void r2pf_toast(const char* title, const char* text, char badge);   /* r3_pcfeat.cpp */
+extern "C" void ps3_vfs_ps3game_fallback(char* path, size_t cap);              /* sys_fs.c: guest path fallbacks */
 static DWORD WINAPI frame_clock(LPVOID)
 {
     port_place_walker();
@@ -403,12 +442,21 @@ static DWORD WINAPI frame_clock(LPVOID)
         r2rsx_set_window(rsx_null_backend_get_hwnd(), WINDOW_WIDTH, WINDOW_HEIGHT);
         fprintf(stderr, "[rsx] RPCS3 RSX core (Vulkan) -- window open\n");
         while (rsx_null_backend_pump_messages() == 0) Sleep(4);
+        rsx_featcov_dump("exit");
         ExitProcess(0);
     }
 
     int rsx_ok = (rsx_backend_init(WINDOW_WIDTH, WINDOW_HEIGHT, title) == 0);
     fprintf(stderr, "[rsx] %s backend init %s\n", RSX_BACKEND_NAME,
             rsx_ok ? "OK -- window open" : "FAILED");
+    {   /* frame generation only exists in the RPCS3 renderer: tell the user instead of silently ignoring it */
+        const char* fg = getenv("R3_DLSS_FG");
+        if (!(fg && *fg)) fg = getenv("R2_DLSS_FG");
+        if (fg && *fg && strcmp(fg, "0") != 0) {
+            fprintf(stderr, "[fg] frame generation off: DLSS_FG=%s needs the rpcs3 renderer (R2_RSX=rpcs3, launcher Renderer \"RPCS3\")\n", fg);
+            r2pf_toast("Frame generation is off", "It needs the RPCS3 renderer (launcher: Renderer).", '!');
+        }
+    }
 
     unsigned  last_flip = 0;
     long long next_tick = fc_us();
@@ -492,9 +540,19 @@ static DWORD WINAPI frame_clock(LPVOID)
             cellGcm_rsx_process_fifo();
 
             if (rsx_backend_pump() != 0) {
-                rsx_ok = 0;              /* window closed */
-                continue;
+                /* window closed (Alt+F4 / X): end the game as the RPCS3 renderer does
+                 * (frame_clock above); only clearing rsx_ok left it running headless */
+                fprintf(stderr, "[rsx] window closed -- exiting\n");
+                rsx_featcov_dump("exit");
+                fflush(stdout); fflush(stderr);
+                ExitProcess(0);
             }
+#if defined(_WIN32)
+            /* D3D12: the port UI changed but no flip came for ~33 ms (the PC menu, quit prompt or
+             * pad-loss pause park the game): present the last frame again with the new UI, as
+             * r2rsx_osd kicks the RPCS3 renderer. */
+            if (s_rsx_d3e) rsx_d3d12_engine_osd_repost(33, g_r2pc_paused != 0 || cellGcm_flip_request_count() == 0);
+#endif
             /* Present on a guest flip. A present on a fixed clock can catch the
              * drain mid-frame and flash a partial one. Before the first flip
              * present freely, so the window is not blank during boot. */
@@ -566,6 +624,70 @@ static void vm_commit_range(uint8_t* p, size_t len)
             VirtualAlloc(q, 0x1000, MEM_COMMIT, PAGE_READWRITE);
     }
 }
+/* R3_AV_WHO (default 1): who reads/writes RSX-protected guest memory when the fault
+ * hook takes >= 1 ms (a render-target readback on the faulting thread). The first
+ * 64 distinct (64 KB region, host PC) pairs are logged once as
+ *   [av-who] guest 0x.. read 4.1 ms thread 'name' spu-job 422 | func_A+0x.. < func_B+0x.. ...
+ * with the lifted PPU functions found on the host stack (nearest entry <= frame PC). */
+static bool av_who_on(void)
+{
+    static int on = -1;
+    if (on < 0) { const char* v = getenv("R3_AV_WHO"); on = !(v && v[0] == '0'); }
+    return on != 0;
+}
+static int av_who_guest(uintptr_t pc, uint32_t* off)
+{
+    uintptr_t best_h = 0; uint32_t best_g = 0;
+    for (uint64_t k = 0; k < function_table_count; k++) {
+        const uintptr_t h = (uintptr_t)function_table[k].func;
+        if (h <= pc && h > best_h) { best_h = h; best_g = function_table[k].addr; }
+    }
+    if (!best_g || pc - best_h >= 0x20000) return 0;
+    *off = (uint32_t)(pc - best_h);
+    return (int)best_g;
+}
+static void av_who_note(const CONTEXT* ctx_in, uint32_t guest, int is_write, double ms)
+{
+    static volatile LONG s_n = 0;
+    static uint64_t s_keys[64];
+    if (s_n >= 64) return;
+    const uint64_t key = ((uint64_t)(guest >> 16) << 48) ^ (uint64_t)ctx_in->Rip;
+    static SRWLOCK s_lock = SRWLOCK_INIT;
+    AcquireSRWLockExclusive(&s_lock);
+    bool dup = false;
+    for (LONG i = 0; i < s_n; i++) dup |= s_keys[i] == key;
+    if (dup || s_n >= 64) { ReleaseSRWLockExclusive(&s_lock); return; }
+    s_keys[s_n] = key; InterlockedIncrement(&s_n);
+    ReleaseSRWLockExclusive(&s_lock);
+
+    char chain[512]; size_t len = 0; chain[0] = 0;
+    CONTEXT c = *ctx_in;
+    int found = 0;
+    for (int d = 0; d < 32 && c.Rip && found < 6 && len < sizeof chain - 48; d++) {
+        uint32_t off = 0;
+        const uint32_t g = (uint32_t)av_who_guest((uintptr_t)c.Rip, &off);
+        if (g) len += snprintf(chain + len, sizeof chain - len, "%sfunc_%08X+0x%X", found++ ? " < " : "", g, off);
+        DWORD64 base = 0;
+        PRUNTIME_FUNCTION f = RtlLookupFunctionEntry(c.Rip, &base, NULL);
+        if (!f) { c.Rip = *(DWORD64*)c.Rsp; c.Rsp += 8; continue; }
+        PVOID hd; DWORD64 ef;
+        RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, &c, &hd, &ef, NULL);
+    }
+    char name[64] = "?";
+    typedef HRESULT (WINAPI *gtd_t)(HANDLE, PWSTR*);
+    static gtd_t gtd = (gtd_t)GetProcAddress(GetModuleHandleA("kernel32.dll"), "GetThreadDescription");
+    PWSTR w = NULL;
+    if (gtd && SUCCEEDED(gtd(GetCurrentThread(), &w)) && w) {
+        if (w[0]) snprintf(name, sizeof name, "%ls", w);
+        LocalFree(w);
+    }
+    DWORD64 mb = 0;
+    RtlLookupFunctionEntry(ctx_in->Rip, &mb, NULL);
+    fprintf(stderr, "[av-who] guest 0x%08X %s %.2f ms thread '%s' (tid %lu) spu-job %d pc %s+0x%llX | %s\n",
+            guest, is_write ? "write" : "read", ms, name, GetCurrentThreadId(), spu_jobtime_cur_img(),
+            mb ? "img" : "?", (unsigned long long)(ctx_in->Rip - mb), found ? chain : "no lifted PPU frame");
+    fflush(stderr);
+}
 static LONG WINAPI vm_commit_veh(EXCEPTION_POINTERS* ep)
 {
     if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
@@ -590,6 +712,12 @@ static LONG WINAPI vm_commit_veh(EXCEPTION_POINTERS* ep)
                 const int claimed = g_vm_access_violation_hook((uint32_t)(fault - base), is_write);
                 QueryPerformanceCounter(&avq1);
                 spu_jobtime_av(avq1.QuadPart - avq0.QuadPart);
+                if (claimed && av_who_on()) {
+                    static LARGE_INTEGER s_qf;
+                    if (!s_qf.QuadPart) QueryPerformanceFrequency(&s_qf);
+                    const double ms = (double)(avq1.QuadPart - avq0.QuadPart) * 1000.0 / (double)s_qf.QuadPart;
+                    if (ms >= 1.0) av_who_note(ep->ContextRecord, (uint32_t)(fault - base), is_write, ms);
+                }
                 if (claimed) return EXCEPTION_CONTINUE_EXECUTION;
             }
             /* Another thread may have lifted the protection while this fault was
@@ -624,7 +752,11 @@ static LONG WINAPI vm_commit_veh(EXCEPTION_POINTERS* ep)
 }
 
 /* Crash and hang reports: logs\crash (R2_CRASH_DUMPS, R2_HANG_S). */
+#include "port_cpucheck.h"  /* AVX2 (x86-64-v3) build: clear error on older CPUs */
 #include "r3_crash.inc"
+#include "port_native_summary.h"
+#include "port_mem.h"         /* PORT_LARGE_PAGES: reported unavailable here, see main() */
+#include "r3_native_dof.h"   /* R3_NATIVE_DOF_DEFAULT for the [native] line */
 #endif
 
 extern "C" void vm_inline_refresh(void);
@@ -724,12 +856,45 @@ static void port_sys_report(void)
 
 extern "C" void cellGame_init_from_paramsfo(const char* sfo_path);
 
+/* The native Vulkan renderer is hidden from the launcher / F10 for now (only the Compatible RPCS3
+ * renderer is offered; the code stays built, the D3D12 renderer shares its draw engine). An old
+ * settings.bat with R2_RSX=vulkan|native falls back to rpcs3 (logged once) unless
+ * R3_RENDERER_FORCE_NATIVE=1 (developer testing). Runs before anything reads R2_RSX. */
+static void r3_renderer_migrate(void)
+{
+    const char* e = getenv("R2_RSX");
+#if defined(_WIN32)
+    /* "Direct3D 12 (experimental)" is offered on its own (not behind the native-Vulkan hide). Without a
+     * usable D3D12 device it falls back to the Compatible renderer here, before anything reads R2_RSX. */
+    if (e && !_stricmp(e, "d3d12")) {
+        if (!rsx_d3d12_engine_probe()) {
+            fprintf(stderr, "[rsx] R2_RSX=d3d12: Direct3D 12 failed its start-up probe; using the Compatible "
+                            "(RPCS3) renderer\n");
+            rsx_d3d12_env_to_rpcs3();   /* also renumbers RSX_FSR */
+        }
+        return;
+    }
+#endif
+    if (!(e && (!_stricmp(e, "vulkan") || !_stricmp(e, "native")))) return;
+    const char* f = getenv("R3_RENDERER_FORCE_NATIVE");
+    if (f && *f == '1') {
+        fprintf(stderr, "[rsx] R2_RSX=%s kept (R3_RENDERER_FORCE_NATIVE=1)\n", e);
+        return;
+    }
+    fprintf(stderr, "[rsx] R2_RSX=%s: the native Vulkan renderer is not offered for now; using the Compatible (RPCS3) "
+                    "renderer (R3_RENDERER_FORCE_NATIVE=1 forces native)\n", e);
+    _putenv("R2_RSX=rpcs3");
+    /* the native renderer's RSX_FSR=3 (FSR 3.1) is the RPCS3 renderer's 1 (as R2) */
+    if (const char* fsr = getenv("RSX_FSR"); fsr && !strcmp(fsr, "3")) _putenv("RSX_FSR=1");
+}
+
 int main(int argc, char** argv)
 {
     if (argc < 2) {
         printf("usage: %s <PPU ELF>\n", argv[0]);
         return 2;
     }
+    r3_renderer_migrate();
 
     /* Before anything starts: the profile sets env switches that the
      * subsystems read when they first run. R2_PRESET fills in the settings
@@ -737,6 +902,9 @@ int main(int argc, char** argv)
     if (const char* preset = getenv("R2_PRESET"); preset && *preset)
         r2ac::apply_preset_env(preset, r2ac::Phase::startup);
     port_cpu_profile_init();
+    /* [cores]: the physical-core count (PORT_CORE_SCARCE, PORT_CORE_SCARCE_BELOW), reported at start-up
+     * as in the Fall of Man port, where it picks the RSX frame clock's idle wait. */
+    (void)ps3_host_core_scarce();
     r2_crash_init();
 
 #ifdef _WIN32
@@ -752,6 +920,71 @@ int main(int argc, char** argv)
 #ifdef _WIN32
     port_sys_report();
 #endif
+    {   /* defaults: r3_hot_native.cpp, r3_native_dof(.h/.c), r3_native_audio.c, r3_native_jobs.c,
+             * tiled_dma_copy_fast.hpp. spu-jobs, edge-zlib (native_edge_zlib.c: native-jobs kernel 0, mask
+             * bit 0, like R2's kernel bit 1), bink-idct (job 421 kernels 1-3) and audio-jobs show the modules' effective state (switches parsed
+             * with the same port_native_parse_bool rules, the masks, whether this build's lifted code has the
+             * hooks, self-check disables), never on when they cannot run. As in R2, an entry whose own switch
+             * says otherwise is labelled "<switch>,overridden" (plus the reason; such a label is never set as
+             * a variable, so the entry shows the given state). */
+        static char jobs_sw[160], zlib_sw[96], audio_sw[96], bink_sw[112];
+        auto label = [](char* buf, size_t cap, const char* env, int def, int on, const char* why) {
+            if (port_native_parse_bool(getenv(env), def) == on || !why) snprintf(buf, cap, "%s", env);
+            else snprintf(buf, cap, "%s,overridden: %s", env, why);
+            return (const char*)buf;
+        };
+        const char* zlib_off = r3nj_kernel_why_off(0);
+        const int zlib_on = !zlib_off;
+        const int jobs_on = r3nj_effective_mask() != 0;
+        char jobs_why[96];
+        snprintf(jobs_why, sizeof jobs_why, "no kernel active (edge_zlib: %s; bink_idct: %s)", zlib_off ? zlib_off : "on",
+                 r3nj_kernel_why_off(1) ? r3nj_kernel_why_off(1) : "on");
+        /* job 421 (Bink video) IDCT kernels 1-3: on when any runs; partial when not all three */
+        const uint32_t bink_eff = r3nj_effective_mask() & 0xEu;
+        const int bink_on = bink_eff != 0;
+        const char* bink_why = r3nj_kernel_why_off(1) ? r3nj_kernel_why_off(1) : r3nj_kernel_why_off(2) ? r3nj_kernel_why_off(2) : r3nj_kernel_why_off(3);
+        label(bink_sw, sizeof bink_sw, "R3_NATIVE_JOBS", 1, bink_on, bink_why);
+        if (bink_on && bink_eff != 0xEu)
+            snprintf(bink_sw, sizeof bink_sw, "R3_NATIVE_JOBS,partial: kernels 0x%X of 0xE (%s)", (unsigned)bink_eff, bink_why);
+        const uint32_t na_eff = r3na_effective_mask(), na_hooks = r3na_hooks_present();
+        const int audio_on = na_eff != 0;
+        const char* audio_why;
+        if (audio_on) audio_why = "R3_NATIVE_AUDIO_VERIFY/_CAPTURE";   /* those run the kernels under JOB=0 too */
+        else if (!na_hooks) audio_why = "hook missing";
+        else if (!(port_native_parse_bool(getenv("R3_NATIVE_AUDIO_JOB"), 1))) audio_why = 0;
+        else {
+            const char* m = getenv("R3_NATIVE_AUDIO_MASK");
+            const uint32_t mask = (m && *m) ? (uint32_t)strtoul(m, 0, 0) & 0x7Fu : 0x7Fu;
+            audio_why = !mask ? "R3_NATIVE_AUDIO_MASK=0" : !(mask & na_hooks) ? "hook missing" : "disabled by self-check";
+        }
+        label(audio_sw, sizeof audio_sw, "R3_NATIVE_AUDIO_JOB", 1, audio_on, audio_why);
+        if (audio_on && na_eff != 0x7Fu)
+            snprintf(audio_sw, sizeof audio_sw, "R3_NATIVE_AUDIO_JOB,partial: kernels 0x%X of 0x7F", (unsigned)na_eff);
+        /* dof-job: the effective level (kernel loops need an AVX2 build; the lean / bulk DMA paths are armed anyway) */
+        char dofj_sw[96];
+        const int dofj_on = r3_native_dof_job_level() != 0;
+        if (!dofj_on && port_native_parse_level(getenv("R3_NATIVE_DOF_JOB"), R3_NATIVE_DOF_JOB_DEFAULT) != 0)
+            snprintf(dofj_sw, sizeof dofj_sw, "R3_NATIVE_DOF_JOB,overridden: kernel loops need an AVX2 build");
+        else snprintf(dofj_sw, sizeof dofj_sw, "R3_NATIVE_DOF_JOB");
+        char pcore_sw[96];
+        const int pcore_on = !port_pcore_why();
+        port_pcore_label(pcore_sw, sizeof pcore_sw, pcore_on, port_pcore_why());
+        const port_native_feature k_native[] = {
+            { "hot-ppu", "R3_HOT_NATIVE", 1 },
+            { "spu-jobs", label(jobs_sw, sizeof jobs_sw, "R3_NATIVE_JOBS", 1, jobs_on, jobs_why), jobs_on },
+            { "audio-jobs", audio_sw, audio_on },
+            { "dof-kernels", "R3_NATIVE_DOF", R3_NATIVE_DOF_DEFAULT }, { "dof-job", dofj_sw, dofj_on, 1 },
+            { "dof-gpu-approx", "R3_DOF_GPU_APPROX", R3_DOF_GPU_APPROX_DEFAULT },
+            { "edge-zlib", label(zlib_sw, sizeof zlib_sw, "PORT_NATIVE_EDGE_ZLIB", 1, zlib_on, zlib_off), zlib_on },
+            { "bink-idct", bink_sw, bink_on },
+            { "detile-fast", "RSX_DETILE_FAST", 1 },
+            { "spu-sched", "PORT_SPU_SCHED", spu_sched_effective() },
+            { "pcore-pin", pcore_sw, pcore_on },
+            /* RSX_GPU_* (gpu-texdecode/gpu-blit/gpu-texstream): r2rsx_bridge.cpp apply_gpu_offload() prints its own
+             * [native] line with the effective state once the yml and the R2_* aliases are applied. */
+        };
+        port_native_summary(k_native, (int)(sizeof k_native / sizeof k_native[0]));
+    }
 
     /* No PlayStation Eye on PC: with the runtime's virtual camera attached,
      * Resistance 3 starts PlayStation Move calibration and waits on it.
@@ -764,9 +997,29 @@ int main(int argc, char** argv)
 #endif
     }
 
+    /* LV2 mapper reservations from 0x30000000 as on the PS3 (the runtime's default is 0x40000000): the game's
+     * GCM IO region (cellGcmInit ioAddress) comes from the first reservation, and everything tuned or
+     * captured so far ran with it at 0x30000000. run.bat sets this too; a launcher that runs the exe directly
+     * did not, which moved the IO region (and the aim DOF light buffer) to 0x40000000. */
+    if (!getenv("PS3_MAPPER_BASE")) {
+#ifdef _WIN32
+        _putenv("PS3_MAPPER_BASE=30000000");
+#else
+        setenv("PS3_MAPPER_BASE", "30000000", 1);
+#endif
+    }
+
     if (!alloc_guest_vm()) {
         fprintf(stderr, "ERROR: could not allocate the guest address space\n");
         return 1;
+    }
+    {   /* PORT_LARGE_PAGES cannot be honoured in this port: the RSX texture cache write-protects guest memory
+         * in 4 KB pages (VirtualProtect) to see CPU writes to textures, which a large page cannot do, and the
+         * guest space is one pagefile section mapped twice (vm_sudo_base), which would have to be committed whole
+         * in large pages. The switch is still read so the [native] line says why it is off. */
+        port_large_pages lp = { port_large_pages_env(), 0, 0, 0, NULL };
+        if (lp.requested) lp.reason = "texture cache needs 4 KB page protection";
+        port_large_pages_summary(&lp);
     }
 
     uint32_t entry = ppu_load_elf(argv[1]);
@@ -777,6 +1030,36 @@ int main(int argc, char** argv)
 
     derive_vfs_root(argv[1]);
     printf("[boot] VFS root: %s\n", ppu_vfs_root);
+
+    /* Game-file preflight: without PARAM.SFO / game.psarc the game sits on a
+     * black screen (after the shader preload) instead of saying what is wrong.
+     * The paths go through the same translation the game's own opens use
+     * (ps3_vfs_ps3game_fallback: flattened <root>/USRDIR trees, HDD-style
+     * game/<id> trees, mods), so only a file the game cannot open either is
+     * reported. The dialog offers "start anyway" (the old behaviour).
+     * R3_SKIP_FILECHECK=1 skips it. */
+    {
+        const char* sk = getenv("R3_SKIP_FILECHECK");
+        if (!(sk && *sk && *sk != '0')) {
+            static const char* const k_req[] = { "PS3_GAME/PARAM.SFO", "PS3_GAME/USRDIR/packed/game/game.psarc" };
+            for (const char* r : k_req) {
+                char p[1200];
+                snprintf(p, sizeof p, "%s/%s", ppu_vfs_root, r);
+                ps3_vfs_ps3game_fallback(p, sizeof p);
+                if (GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES) {
+                    char m[1700];
+                    snprintf(m, sizeof m, "The game files are incomplete. Missing:\n%s\n\n"
+                             "Run Setup.exe again and select your Resistance 3 copy (the folder with PS3_GAME).\n\n"
+                             "Start anyway? (the game will most likely stay on a black screen)", p);
+                    fprintf(stderr, "[boot] missing game file %s (R3_SKIP_FILECHECK=1 skips this check)\n", p);
+                    fflush(NULL);
+                    if (MessageBoxA(NULL, m, "Resistance 3", MB_ICONERROR | MB_YESNO | MB_DEFBUTTON2) != IDYES)
+                        ExitProcess(3);
+                    break;
+                }
+            }
+        }
+    }
 
     /* Resistance port: real title id (BCES00226) from PARAM.SFO, not BLES00000 */
     {
@@ -803,6 +1086,7 @@ int main(int argc, char** argv)
     }
     r3_patches_apply();      /* RPCS3 patch.yml data patches (r3_patches.cpp) */
     CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);
+    { extern void ps3_sampler_start(void); ps3_sampler_start(); } /* PS3_SAMPLE=<ms>, off by default */
 
     printf("\n[boot] dispatching entry OPD 0x%08X (stack top 0x%08X)\n\n",
            entry, STACK_TOP);
