@@ -3,6 +3,10 @@ Upstream base of this ps3recomp/ copy
 
 Upstream: https://github.com/sp00nznet/ps3recomp (MIT, see LICENSE in this folder)
 
+Note: this describes the original import only. Later port releases (from
+0.3.0-beta on) changed many ps3recomp/ files on top of it, so the current
+tree no longer matches any upstream commit byte for byte.
+
 Base: not a single commit. The copy matches upstream commits in this window
 (commit-date order, oldest to newest):
 
