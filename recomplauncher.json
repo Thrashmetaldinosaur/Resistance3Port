@@ -107,7 +107,7 @@
           }
         },
         {
-          "label": "5120 x 2160 (native ultrawide)",
+          "label": "5120 x 2160 (ultrawide)",
           "set": {
             "window": "5120x2160"
           }
