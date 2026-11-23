@@ -286,7 +286,7 @@ def spu(port, tk, eboot, work, spudir=None):
             raise SystemExit('lift of %s FAILED:\n%s' % (nm, (r.stdout + r.stderr)[-2000:]))
         return nm
     print('[spu] lifting %d images...' % len(jobs), flush=True)
-    with ThreadPoolExecutor(os.cpu_count() or 4) as ex:
+    with ThreadPoolExecutor(min(4, os.cpu_count() or 4)) as ex:
         for i, nm in enumerate(ex.map(run_one, jobs)):
             if i % 25 == 0: print('  [%d/%d] %s' % (i + 1, len(jobs), nm), flush=True)
     spans = {nm: code_span(pe, base, size) for nm, _, pe, base, size in jobs if size}
@@ -343,7 +343,7 @@ def spu(port, tk, eboot, work, spudir=None):
         hook('post', n, f)
         subprocess.run([sys.executable, os.path.join(HERE, 'spu_w0.py'), f], check=True, capture_output=True)
         shutil.copytree(x, os.path.join(spudir, n))
-    with ThreadPoolExecutor(os.cpu_count() or 4) as ex:
+    with ThreadPoolExecutor(min(4, os.cpu_count() or 4)) as ex:
         list(ex.map(post, mods))
     print('[spu] %d images in %s' % (len(mods), spudir), flush=True)
 
