@@ -363,6 +363,11 @@ static void register_pc_options()
                "Skips the studio logo video and the opening movie at start-up "
                "(the game goes straight to the title screen).",
                "SKIP_INTRO", { {"On", ""}, {"Off", "0"} }, 0);
+    add_option(SEC_PC, "quickresume", "Resume last campaign checkpoint",
+               "When a campaign save is present, automatically advances past the title and menus into "
+               "Campaign > Continue. If no save exists, normal startup is used. Does not alter saved games. "
+               "Disable this option to show the normal title and menus.",
+               "R3_QUICK_RESUME", { {"Off  (normal startup)", ""}, {"On  (auto-continue)", "1"} }, 0);
     add_option(SEC_PC, "menufps", "Frame rate in menus",
                "Caps the frame rate whenever you are not in control of your character (menus, loading screens, "
                "cutscenes) to save power and heat. Gameplay keeps the Frame rate setting.",
