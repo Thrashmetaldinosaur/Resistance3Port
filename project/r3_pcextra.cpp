@@ -669,6 +669,8 @@ static void bench_tick(HWND game)
     }
 }
 /* the capture hotkey: press to start, press again to stop and save (also stops when the buffer is full) */
+#include "r3_quickresume.inc"
+
 static void bench_key_tick(int focused, int other_prompt)
 {
     static int was = 0;
@@ -1369,6 +1371,7 @@ extern "C" void r2x_ui_tick(void* hwnd_, int focused, int other_prompt)
     init_once();
     const ULONGLONG now = GetTickCount64();
     bench_tick(hwnd);
+    r3_quickresume_tick(hwnd);
     bench_key_tick(focused, other_prompt);
 
     /* F9: the extras menu directly; F10 -> More PC Options opens it from the PC menu */

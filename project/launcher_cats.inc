@@ -30,7 +30,7 @@ static const CatGroup g_cat[] = {
     { P_UI,       "MOVIES",                        "cutscene_skip cutscene_skip_all skiphint" },
     { P_UI,       "OVERLAYS",                      "overlay ovgraph uiscale benchkey" },
     { P_UI,       "PHOTO MODE AND DISCORD",        "photo discord" },
-    { P_ADVANCED, "START-UP",                      "skipintro" },
+    { P_ADVANCED, "START-UP",                      "skipintro faststart quickresume" },
     { P_ADVANCED, "MODS AND TEXTURES",             "mods texpack texdump hdui" },
     { P_ADVANCED, "SAVES",                         "savedir savebackup" },
     { P_ADVANCED, "CPU THREADS",                   "pcores threadprio" },
