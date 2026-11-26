@@ -87,7 +87,7 @@ The checks run on your PC only. Nothing is uploaded.
 
 The [Fast Intro mod](docs/FAST_INTRO.md) skips three redundant startup
 branding/notice cards while retaining the epilepsy warning. It is generated
-locally from your own copy of the game using scripts/install_fast_intro.py;
+locally from your own copy of the game using tools/install_fast_intro.py;
 no game assets are shipped. It uses the existing Mods folder support and
 does not alter original game archives, saves, or executables.
 

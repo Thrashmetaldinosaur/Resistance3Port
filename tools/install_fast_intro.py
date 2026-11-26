@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-from pathlib import Path
+import os
 import struct
 import sys
+import tempfile
 import zlib
+from pathlib import Path
 
 ARCHIVE_REL = Path("gamefiles/PS3_GAME/USRDIR/packed/game/global_cached.psarc")
 MEMBER = "/ui/screens/frontend/frontend.swf"
@@ -203,6 +205,37 @@ def patch_frontend(swf: bytes) -> bytes:
     return result
 
 
+def atomic_install(target: Path, contents: bytes) -> None:
+    """Commit a complete replacement only after the file has been fully written.
+
+    The temporary file shares the target directory, so os.replace is atomic
+    on the destination filesystem. Interrupted writes never leave a partial SWF
+    at the final target path.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary_name = tempfile.mkstemp(prefix=target.name + ".", suffix=".tmp", dir=target.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(contents)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def delete_generated_psarc_cache(game_dir: Path) -> int:
+    """Remove generated cache for this archive; never touch original game data."""
+    cache_dir = game_dir / "mods" / ".cache"
+    deleted = 0
+    for cached in cache_dir.glob("usrdir_packed_game_global_cached.psarc.*.psarc"):
+        if cached.is_file():
+            cached.unlink()
+            deleted += 1
+    return deleted
+
+
 def run(game_dir: Path, mode: str) -> int:
     game_dir = game_dir.resolve()
     archive = game_dir / ARCHIVE_REL
@@ -234,8 +267,7 @@ def run(game_dir: Path, mode: str) -> int:
         if existing == generated:
             print("Already installed; nothing changed.")
         else:
-            mod.parent.mkdir(parents=True, exist_ok=True)
-            mod.write_bytes(generated)
+            atomic_install(mod, generated)
             print(f"Installed: {mod}")
         print("Enable 'Mods folder' under Display > PC in Launcher.exe, then start the game.")
         print("First modded launch may build a cached PSARC; later launches reuse it.")
@@ -254,6 +286,8 @@ def run(game_dir: Path, mode: str) -> int:
                 folder.rmdir()
                 folder = folder.parent
             print("Removed Fast Intro mod. Original game archive was never modified.")
+            count = delete_generated_psarc_cache(game_dir)
+            print(f"Removed {count} generated global_cached.psarc cache file(s).")
     return 0
 
 
@@ -261,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--game-dir", type=Path, default=Path(__file__).resolve().parents[1],
-        help="Installed Resistance3Port directory (default: script repository root)",
+        help="Installed Resistance3Port directory (default: parent of tools/)",
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--dry-run", action="store_true", help="Generate and validate without writing")

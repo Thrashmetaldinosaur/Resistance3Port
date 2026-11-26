@@ -3,10 +3,11 @@ import struct
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from scripts.install_fast_intro import (
+from tools.install_fast_intro import (
     ARCHIVE_REL, MEMBER, OVERRIDE_REL, UnsupportedGameFile,
-    extract_member, patch_frontend, run,
+    extract_member, patch_frontend, run, main,
 )
 
 
@@ -47,6 +48,18 @@ def synthetic_psarc(frontend, compressed):
 
 
 class FastIntroTests(unittest.TestCase):
+    def test_shipped_tools_script_defaults_to_install_root(self):
+        from tools import install_fast_intro
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / ARCHIVE_REL
+            source.parent.mkdir(parents=True)
+            source.write_bytes(synthetic_psarc(synthetic_swf(), False))
+            fake_script = root / "tools" / "install_fast_intro.py"
+            with mock.patch.object(install_fast_intro, "__file__", str(fake_script)):
+                self.assertEqual(main(["--dry-run"]), 0)
+            self.assertFalse((root / OVERRIDE_REL).exists())
+
     def test_swfs_are_the_same_size_and_second_patch_fails_closed(self):
         original = synthetic_swf()
         modified = patch_frontend(original)
@@ -89,6 +102,42 @@ class FastIntroTests(unittest.TestCase):
                 self.assertFalse(mod.exists())
                 self.assertEqual(source.read_bytes(), archive_data)
 
+    def test_generated_cache_removed_without_deleting_other_cache_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / ARCHIVE_REL
+            source.parent.mkdir(parents=True)
+            archive_data = synthetic_psarc(synthetic_swf(), False)
+            source.write_bytes(archive_data)
+            self.assertEqual(run(root, "install"), 0)
+            cache = root / "mods" / ".cache"
+            cache.mkdir(parents=True)
+            obsolete = cache / "usrdir_packed_game_global_cached.psarc.123456789abcdef0.psarc"
+            unrelated = cache / "other_game.psarc.12345678.psarc"
+            obsolete.write_bytes(b"synthetic cache")
+            unrelated.write_bytes(b"unrelated cache")
+            self.assertEqual(run(root, "verify"), 0)
+            self.assertTrue(obsolete.exists())
+            self.assertEqual(run(root, "remove"), 0)
+            self.assertFalse(obsolete.exists())
+            self.assertEqual(unrelated.read_bytes(), b"unrelated cache")
+            self.assertEqual(source.read_bytes(), archive_data)
+
+    def test_atomic_replace_failure_leaves_no_partial_mod(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / ARCHIVE_REL
+            source.parent.mkdir(parents=True)
+            source.write_bytes(synthetic_psarc(synthetic_swf(), True))
+            target = root / OVERRIDE_REL
+            with mock.patch("tools.install_fast_intro.os.replace", side_effect=OSError("simulated replace failure")):
+                with self.assertRaises(OSError):
+                    run(root, "install")
+            self.assertFalse(target.exists())
+            self.assertFalse(list(target.parent.glob("*.tmp")))
+            self.assertEqual(run(root, "install"), 0)
+            self.assertEqual(run(root, "verify"), 0)
+
     def test_existing_customization_is_never_overwritten_or_deleted(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -98,11 +147,16 @@ class FastIntroTests(unittest.TestCase):
             mod = root / OVERRIDE_REL
             mod.parent.mkdir(parents=True)
             mod.write_bytes(b"custom mod")
+            cache = root / "mods" / ".cache"
+            cache.mkdir(parents=True)
+            stale = cache / "usrdir_packed_game_global_cached.psarc.cached.psarc"
+            stale.write_bytes(b"cache retained on failed removal")
             with self.assertRaises(FileExistsError):
                 run(root, "install")
             with self.assertRaises(FileExistsError):
                 run(root, "remove")
             self.assertEqual(mod.read_bytes(), b"custom mod")
+            self.assertTrue(stale.exists())
 
 
 if __name__ == "__main__":
